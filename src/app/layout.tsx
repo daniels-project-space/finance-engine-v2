@@ -17,6 +17,19 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body className={`${grotesk.variable} ${mono.variable} min-h-screen antialiased`}>
+        <span
+          aria-hidden
+          style={{
+            position: "fixed",
+            top: 6,
+            left: 6,
+            width: 14,
+            height: 14,
+            borderRadius: "50%",
+            backgroundColor: "#FFD400",
+            zIndex: 9999,
+          }}
+        />
         <Providers>
           <header className="border-b border-edge bg-panel/70 backdrop-blur sticky top-0 z-20">
             <div className="mx-auto max-w-7xl px-5 h-14 flex items-center gap-6">
