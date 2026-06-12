@@ -23,12 +23,35 @@ export default function Overview() {
   const datasets = useQuery(api.pipeline.listDatasets, {});
   const trials = useQuery(api.pipeline.getCounter, { key: "trials_total" });
   const llmSpend = useQuery(api.pipeline.getCounter, { key: `llm_usd_cents:${new Date().toISOString().slice(0, 10)}` });
+  const spxRaw = useQuery(api.pipeline.getConfig, { key: "benchmark_spx" });
 
   const leader = champion ?? board?.[0];
   const leaderMetrics = leader?.metrics ? (JSON.parse(leader.metrics) as Record<string, number>) : {};
   let leaderCurves: { full?: Curve; wf?: Curve; port?: Curve; sealed?: Curve } = {};
   try { leaderCurves = leader?.curves ? JSON.parse(leader.curves) : {}; } catch {}
   const bestComposite = Math.max(0, ...(board ?? []).map((b) => b.composite ?? 0));
+
+  // headline curve = the most deployment-like validated curve available,
+  // benchmarked against the S&P 500 rebased to the same start
+  const headline = leaderCurves.port ?? leaderCurves.wf ?? leaderCurves.full;
+  let spxCurve: Curve | undefined;
+  if (spxRaw && headline?.t?.length) {
+    try {
+      const spx = JSON.parse(spxRaw) as { t: number[]; c: number[] };
+      const t0 = headline.t[0], t1 = headline.t[headline.t.length - 1];
+      const t: number[] = [], eq: number[] = [];
+      let base = 0;
+      for (let i = 0; i < spx.t.length; i++) {
+        if (spx.t[i] < t0 || spx.t[i] > t1) continue;
+        if (!base) base = spx.c[i];
+        t.push(spx.t[i]); eq.push(spx.c[i] / base);
+      }
+      if (t.length > 2) spxCurve = { t, eq };
+    } catch { /* no benchmark */ }
+  }
+  const headlineLabel = leaderCurves.port ? "strategy — 5-pair portfolio, out-of-sample" : leaderCurves.wf ? "strategy — BTC walk-forward, out-of-sample" : "strategy — full backtest";
+  const stratMult = headline?.eq?.length ? headline.eq[headline.eq.length - 1] : undefined;
+  const spxMult = spxCurve?.eq?.length ? spxCurve.eq[spxCurve.eq.length - 1] : undefined;
 
   const alive = funnel ? (funnel.incubating ?? 0) + (funnel.eligible ?? 0) + (funnel.champion ?? 0) + (funnel.sealed_passed ?? 0) : 0;
 
@@ -74,13 +97,12 @@ export default function Overview() {
                 </div>
                 <p className="text-dim text-sm mt-2 max-w-xl leading-relaxed">{leader.hypothesis.slice(0, 220)}</p>
                 <div className="flex gap-7 mt-5 flex-wrap">
-                  <Stat label="Composite" value={fmtNum(leader.composite)} tone="gold" />
-                  <Stat label="BTC WF Sharpe" value={fmtNum(leaderMetrics.wfPooledSharpe)} />
-                  <Stat label="Portfolio OOS" value={fmtNum(leaderMetrics.portOosSharpe)} tone={leaderMetrics.portOosSharpe > 0 ? "up" : undefined} />
-                  <Stat label="Max DD" value={fmtPct(leaderMetrics.fullMaxDD, 0)} tone={(leaderMetrics.fullMaxDD ?? 0) < -0.25 ? "down" : undefined} />
-                  <Stat label="Win rate" value={fmtPct(leaderMetrics.winRate, 0)} />
-                  <Stat label="CAGR" value={fmtPct(leaderMetrics.fullCagr, 0)} tone={(leaderMetrics.fullCagr ?? 0) > 0 ? "up" : "down"} />
+                  <Stat label="Score" value={fmtNum(leader.composite)} tone="gold" />
+                  <Stat label="OOS Sharpe" value={fmtNum(leaderMetrics.portOosSharpe ?? leaderMetrics.wfPooledSharpe)} tone={(leaderMetrics.portOosSharpe ?? leaderMetrics.wfPooledSharpe ?? 0) > 0 ? "up" : undefined} />
+                  <Stat label="Worst drop" value={fmtPct(leaderMetrics.fullMaxDD, 0)} tone={(leaderMetrics.fullMaxDD ?? 0) < -0.25 ? "down" : undefined} />
+                  <Stat label="Yearly return" value={fmtPct(leaderMetrics.fullCagr, 0)} tone={(leaderMetrics.fullCagr ?? 0) > 0 ? "up" : "down"} />
                 </div>
+                <p className="num text-[11px] text-dim mt-2">Sharpe: above 1 is strong, above 1.5 is the goal · worst drop = deepest peak-to-trough loss</p>
               </>
             ) : <div className="text-dim">No scored candidates yet.</div>}
             <div className="mt-6 max-w-md">
@@ -88,12 +110,19 @@ export default function Overview() {
             </div>
           </div>
           <div className="min-w-0">
-            {(leaderCurves.wf || leaderCurves.full) && (
-              <LineChart series={[
-                ...(leaderCurves.port ? [{ name: "portfolio OOS", color: "#e8b34b", curve: leaderCurves.port }] : []),
-                ...(leaderCurves.wf ? [{ name: "BTC WF OOS", color: "#2dd4a7", curve: leaderCurves.wf }] : []),
-                ...(leaderCurves.full ? [{ name: "full backtest", color: "#5aa9e6", curve: leaderCurves.full }] : []),
-              ]} height={230} />
+            {headline && (
+              <>
+                <LineChart series={[
+                  { name: headlineLabel, color: "#2dd4a7", curve: headline },
+                  ...(spxCurve ? [{ name: "S&P 500 (same period)", color: "#9fb0bd", curve: spxCurve }] : []),
+                ]} height={230} yLabel="growth of 1" />
+                {stratMult !== undefined && (
+                  <p className="num text-[11px] text-dim mt-1">
+                    $10k → <span className="text-up">${(stratMult * 10000).toFixed(0)}</span> with this strategy
+                    {spxMult !== undefined && <> vs <span className="text-fg">${(spxMult * 10000).toFixed(0)}</span> in the S&P 500</>} over the validated window
+                  </p>
+                )}
+              </>
             )}
           </div>
         </div>

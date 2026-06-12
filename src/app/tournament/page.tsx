@@ -44,11 +44,8 @@ function Row({ r, rank }: { r: Parsed; rank: number }) {
       <td className="num text-right text-up">{fmtNum(r.m.portOosSharpe)}</td>
       <td className="num text-right">{fmtNum(r.m.wfPooledSharpe)}</td>
       <td className="num text-right">{fmtNum(r.m.sealedSharpe)}</td>
-      <td className="num text-right">{fmtNum(r.m.fullSharpe)}</td>
       <td className={`num text-right ${(r.m.fullMaxDD ?? 0) < -0.25 ? "text-down" : "text-dim"}`}>{fmtPct(r.m.fullMaxDD, 0)}</td>
       <td className="num text-right text-dim">{fmtPct(r.m.winRate, 0)}</td>
-      <td className="num text-right text-dim">{r.m.fullTrades ?? "—"}</td>
-      <td className="num text-right text-dim">{fmtNum(r.m.dsr, 2)}</td>
     </tr>
   );
 }
@@ -114,9 +111,8 @@ export default function TournamentPage() {
           <div className="tablewrap"><table className="w-full text-sm">
             <thead><tr className="hud text-left">
               <th className="pb-2">#</th><th>strategy</th><th>gauntlet trail</th><th className="px-2">WF OOS equity</th>
-              <th className="text-right">comp</th><th className="text-right">PORT</th><th className="text-right">BTC wf</th><th className="text-right">sealed</th>
-              <th className="text-right">full</th><th className="text-right">maxDD</th><th className="text-right">win%</th>
-              <th className="text-right">trades</th><th className="text-right">DSR</th>
+              <th className="text-right">score</th><th className="text-right">PORT shrp</th><th className="text-right">BTC shrp</th><th className="text-right">sealed</th>
+              <th className="text-right">worst drop</th><th className="text-right">win%</th>
             </tr></thead>
             <tbody>{league.map((r, i) => <Row key={r.id} r={r} rank={i + 1} />)}</tbody>
           </table></div>
@@ -133,9 +129,8 @@ export default function TournamentPage() {
           <div className="tablewrap"><table className="w-full text-sm">
             <thead><tr className="hud text-left">
               <th className="pb-2">#</th><th>strategy</th><th>gauntlet trail</th><th className="px-2">WF OOS equity</th>
-              <th className="text-right">comp</th><th className="text-right">PORT</th><th className="text-right">BTC wf</th><th className="text-right">sealed</th>
-              <th className="text-right">full</th><th className="text-right">maxDD</th><th className="text-right">win%</th>
-              <th className="text-right">trades</th><th className="text-right">DSR</th>
+              <th className="text-right">score</th><th className="text-right">PORT shrp</th><th className="text-right">BTC shrp</th><th className="text-right">sealed</th>
+              <th className="text-right">worst drop</th><th className="text-right">win%</th>
             </tr></thead>
             <tbody>{qualifiers.slice(0, 40).map((r, i) => <Row key={r.id} r={r} rank={i + 1} />)}</tbody>
           </table></div>

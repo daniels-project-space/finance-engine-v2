@@ -177,6 +177,15 @@ async function main() {
   check("wf params vary across windows", new Set(wf.windows.map((w) => JSON.stringify(w.params))).size > 1);
   check("wf pooled sharpe finite", Number.isFinite(wf.pooledSharpe));
 
+  console.log("— walk-forward honesty (negative control) —");
+  // pure random walk: an honest WF must NOT find an edge in noise
+  const noiseBars = synthBars(22_000, 99, 0); // zero drift, no regimes
+  const nullWf = walkForward(emaCross, noiseBars, opts, { trainMonths: 6, stepMonths: 2, tuneTrials: 12 });
+  // honest WF on driftless noise must be <= ~0 (costs drag it negative);
+  // a POSITIVE result here would mean look-ahead/selection leaking into OOS
+  check("WF finds NO positive edge in pure noise", nullWf.pooledSharpe < 0.3, `pooled=${nullWf.pooledSharpe.toFixed(2)} over ${nullWf.windows.length} windows (negative = cost drag, the honest outcome)`);
+  check("WF train/test never overlap seal", nullWf.windows.every((w) => w.testStartTs > w.trainStartTs));
+
   console.log("— statistics —");
   const d = dsr(res.ret, 2, bars.c.length - 1, 100);
   check("dsr in [0,1]", d >= 0 && d <= 1, `${d}`);

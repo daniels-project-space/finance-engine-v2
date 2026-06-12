@@ -111,10 +111,11 @@ export function seriesStats(ret: number[], t: number[], ppy: number) {
   }
   const months = Array.from(monthly.values());
   const pctPositive = months.length ? months.filter((g) => g > 1).length / months.length : 0;
+  const worstMonth = months.length ? Math.min(...months) - 1 : 0;
   const years = n / ppy;
   const totalRet = eq - 1;
   const cagr = years > 0.2 && eq > 0 ? Math.pow(eq, 1 / years) - 1 : 0;
-  return { sharpe, maxDD, pctPositive, equity: eqOut, totalRet, cagr, months: months.length };
+  return { sharpe, maxDD, pctPositive, worstMonth, equity: eqOut, totalRet, cagr, months: months.length };
 }
 
 export function optsFor(symbol: string, tf: string) {
@@ -241,6 +242,7 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
   curves.port = downsampleCurve(port.t, ps.equity, 0, port.t.length - 1, 240);
   if (ps.sharpe < floors.portMinSharpe) return fail("S4-portfolio", `portfolio OOS sharpe ${ps.sharpe.toFixed(2)} < ${floors.portMinSharpe}`, started, { ...perSymbol, portfolio: ps.sharpe });
   if (ps.pctPositive < floors.portMinPctPositive) return fail("S4-portfolio", `portfolio ${(ps.pctPositive * 100).toFixed(0)}% positive months < ${floors.portMinPctPositive * 100}%`, started, { ...perSymbol, portfolio: ps.sharpe, pctPositive: ps.pctPositive });
+  if (ps.worstMonth < floors.portWorstMonth) return fail("S4-portfolio", `portfolio worst month ${(ps.worstMonth * 100).toFixed(1)}% < ${floors.portWorstMonth * 100}%`, started, { ...perSymbol, portfolio: ps.sharpe, worstMonth: ps.worstMonth });
   stages.push({ stage: "S4-cross-symbol", passed: true, durationMs: Date.now() - started, detail: { ...perSymbol, portfolioSharpe: ps.sharpe, portfolioPctPositive: ps.pctPositive, portfolioMaxDD: ps.maxDD } });
   g.log?.(`S4 pass positive=${positive} portfolio=${ps.sharpe.toFixed(2)}`);
 

@@ -125,13 +125,16 @@ export interface GateFloors {
   trainMinSharpe: number;        // 0.8
   trainMinTradesPerYear: number; // 30
   trainMaxDD: number;            // -0.35
-  wfMinMeanSharpe: number;       // 0.5  (single-symbol, BTC)
-  wfMinPctPositive: number;      // 0.45 (single-symbol; portfolio floor is the strict one)
-  wfWorstMonth: number;          // -0.15
-  wfMaxDD: number;               // -0.30
+  // S3 single-symbol floors are a SCREEN (cut obvious junk cheaply);
+  // the BINDING floors live at the deployed-portfolio level (S4).
+  wfMinMeanSharpe: number;       // 0.2  screen
+  wfMinPctPositive: number;      // 0.40 screen
+  wfWorstMonth: number;          // -0.22 screen
+  wfMaxDD: number;               // -0.35 screen
   crossSymbolMinPositive: number;// 3 (of universe)
   portMinSharpe: number;         // 0.7  (deployed equal-weight portfolio, all OOS)
   portMinPctPositive: number;    // 0.55 (portfolio monthly consistency — deployment level)
+  portWorstMonth: number;        // -0.12 (portfolio worst month — deployment level)
   minDSR: number;                // 0.95
   maxPermutationP: number;       // 0.05
   stressSlipMultSurvive: number; // 3 (sharpe@3x > 50% base)
@@ -147,13 +150,14 @@ export const DEFAULT_FLOORS: GateFloors = {
   trainMinSharpe: 0.8,
   trainMinTradesPerYear: 30,
   trainMaxDD: -0.35,
-  wfMinMeanSharpe: 0.5,
-  wfMinPctPositive: 0.45,
-  wfWorstMonth: -0.15,
-  wfMaxDD: -0.3,
+  wfMinMeanSharpe: 0.2,
+  wfMinPctPositive: 0.4,
+  wfWorstMonth: -0.22,
+  wfMaxDD: -0.35,
   crossSymbolMinPositive: 3,
   portMinSharpe: 0.7,
   portMinPctPositive: 0.55,
+  portWorstMonth: -0.12,
   minDSR: 0.95,
   maxPermutationP: 0.05,
   stressSlipMultSurvive: 3,

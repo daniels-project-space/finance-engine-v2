@@ -1,6 +1,7 @@
 import { logger, schedules } from "@trigger.dev/sdk";
 import { api, convex } from "../lib/convexClient";
 import { mergeConfig } from "../lib/appConfig";
+import { fetchSpx } from "../lib/benchmark";
 import { aggregateBars, ingestSymbol, loadBars } from "../lib/data";
 import { candleKey, putJsonGz } from "../lib/storage";
 
@@ -37,6 +38,11 @@ export const ingestCandles = schedules.task({
             bars: agg.t.length, gaps: 0, r2Key: candleKey(symbol, target),
           });
         }
+      }
+      // refresh S&P 500 benchmark once a day (~midnight pass)
+      if (new Date().getUTCHours() === 0 || !(await cx.query(api.pipeline.getConfig, { key: "benchmark_spx" }))) {
+        const spx = await fetchSpx((m) => logger.log(m));
+        if (spx) await cx.mutation(api.pipeline.setConfig, { key: "benchmark_spx", json: JSON.stringify(spx) });
       }
       await cx.mutation(api.pipeline.finishRun, { id: runId, status: "ok", summary: JSON.stringify(results) });
       return results;

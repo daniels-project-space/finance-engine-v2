@@ -34,41 +34,53 @@ export default function CandidateDetail({ params }: { params: Promise<{ id: stri
         <div className="mt-4"><GauntletTrail failedStage={cand.failedStage} stage={cand.stage} /></div>
         {cand.failedReason && <p className="text-down mt-2 text-sm num">✗ {cand.failedStage}: {cand.failedReason}</p>}
         <div className="flex gap-8 mt-5 flex-wrap">
-          <Stat label="Composite" value={fmtNum(cand.composite)} tone="gold" />
-          <Stat label="Portfolio OOS" value={fmtNum(metrics.portOosSharpe)} tone={metrics.portOosSharpe > 0 ? "up" : undefined} />
-          <Stat label="Train Sharpe" value={fmtNum(metrics.trainSharpe)} />
-          <Stat label="BTC WF Sharpe" value={fmtNum(metrics.wfPooledSharpe)} />
-          <Stat label="WF positive months" value={fmtPct(metrics.wfPctPositive, 0)} />
-          <Stat label="Max DD" value={fmtPct(metrics.fullMaxDD, 0)} tone={(metrics.fullMaxDD ?? 0) < -0.25 ? "down" : undefined} />
+          <Stat label="Score" value={fmtNum(cand.composite)} tone="gold" />
+          <Stat label="OOS Sharpe" value={fmtNum(metrics.portOosSharpe ?? metrics.wfPooledSharpe)} tone={(metrics.portOosSharpe ?? metrics.wfPooledSharpe ?? 0) > 0 ? "up" : undefined} />
+          <Stat label="Worst drop" value={fmtPct(metrics.fullMaxDD, 0)} tone={(metrics.fullMaxDD ?? 0) < -0.25 ? "down" : undefined} />
+          <Stat label="Yearly return" value={fmtPct(metrics.fullCagr, 0)} tone={(metrics.fullCagr ?? 0) > 0 ? "up" : "down"} />
           <Stat label="Win rate" value={fmtPct(metrics.winRate, 0)} />
-          <Stat label="CAGR" value={fmtPct(metrics.fullCagr, 1)} tone={(metrics.fullCagr ?? 0) > 0 ? "up" : "down"} />
-          <Stat label="Trades" value={String(metrics.fullTrades ?? "—")} />
-          <Stat label="DSR" value={fmtNum(metrics.dsr, 3)} />
-          <Stat label="Permutation p" value={fmtNum(metrics.permutationP, 3)} />
-          <Stat label="Bootstrap p5" value={fmtNum(metrics.bootstrapP5)} />
           <Stat label="Sealed Sharpe" value={fmtNum(metrics.sealedSharpe)} tone={metrics.sealedSharpe > 0 ? "up" : undefined} />
         </div>
+        <details className="mt-3">
+          <summary className="hud cursor-pointer">all validation numbers</summary>
+          <div className="flex gap-8 mt-3 flex-wrap">
+            <Stat label="Train Sharpe" value={fmtNum(metrics.trainSharpe)} />
+            <Stat label="BTC WF Sharpe" value={fmtNum(metrics.wfPooledSharpe)} />
+            <Stat label="Positive months" value={fmtPct(metrics.wfPctPositive, 0)} />
+            <Stat label="Trades" value={String(metrics.fullTrades ?? "—")} />
+            <Stat label="DSR" value={fmtNum(metrics.dsr, 3)} />
+            <Stat label="Permutation p" value={fmtNum(metrics.permutationP, 3)} />
+            <Stat label="Bootstrap p5" value={fmtNum(metrics.bootstrapP5)} />
+          </div>
+        </details>
       </section>
 
-      {(curves.full || curves.wf) && (
-        <section className="panel p-5 space-y-4">
-          <div className="hud">Performance — backtest (development period{curves.sealed ? " + sealed holdout" : ""})</div>
-          <LineChart series={[
-            ...(curves.full ? [{ name: "full backtest", color: "#5aa9e6", curve: curves.full }] : []),
-            ...(curves.sealed ? [{ name: "SEALED (never seen)", color: "#e8b34b", curve: curves.sealed }] : []),
-          ]} />
-          {curves.full && <DrawdownChart curve={curves.full} />}
-          {(curves.wf || curves.port) && (
-            <>
-              <div className="hud pt-2">Walk-forward out-of-sample only (re-tuned monthly — the honest curves)</div>
-              <LineChart series={[
-                ...(curves.port ? [{ name: "PORTFOLIO (5 pairs, deployed)", color: "#e8b34b", curve: curves.port }] : []),
-                ...(curves.wf ? [{ name: "BTC only", color: "#2dd4a7", curve: curves.wf }] : []),
-              ]} height={170} />
-            </>
-          )}
-        </section>
-      )}
+      {(curves.port || curves.wf || curves.full) && (() => {
+        const headline = curves.port ?? curves.wf ?? curves.full!;
+        const label = curves.port ? "5-pair portfolio — out-of-sample only" : curves.wf ? "BTC walk-forward — out-of-sample only" : "full backtest";
+        const mult = headline.eq[headline.eq.length - 1];
+        return (
+          <section className="panel p-5 space-y-3">
+            <div className="hud">How it performed — {label}</div>
+            <LineChart series={[{ name: label, color: "#2dd4a7", curve: headline }]} height={200} yLabel="growth of 1" />
+            <p className="num text-[11px] text-dim">$10k → <span className={mult >= 1 ? "text-up" : "text-down"}>${(mult * 10000).toFixed(0)}</span>. Every point on this curve was earned on data the strategy had never seen when its settings were chosen.</p>
+            <details>
+              <summary className="hud cursor-pointer">more charts — full backtest, sealed holdout, drawdown</summary>
+              <div className="space-y-4 mt-3">
+                <LineChart series={[
+                  ...(curves.full ? [{ name: "full backtest", color: "#5aa9e6", curve: curves.full }] : []),
+                  ...(curves.sealed ? [{ name: "SEALED (never seen)", color: "#e8b34b", curve: curves.sealed }] : []),
+                ]} />
+                {curves.full && <DrawdownChart curve={curves.full} />}
+                {curves.wf && curves.port && <LineChart series={[
+                  { name: "portfolio OOS", color: "#e8b34b", curve: curves.port },
+                  { name: "BTC only OOS", color: "#2dd4a7", curve: curves.wf },
+                ]} height={160} />}
+              </div>
+            </details>
+          </section>
+        );
+      })()}
 
       {acct && (() => {
         const rets = snaps ? [...snaps].reverse().map((s) => s.ret) : [];
