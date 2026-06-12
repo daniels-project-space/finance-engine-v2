@@ -148,7 +148,9 @@ export async function proposeWithDeepSeek(
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "deepseek/deepseek-chat",
-      provider: { only: ["deepseek", "alibaba"] }, // fp8 hosts corrupt JSON
+      // prefer first-party hosts; fall back to whatever is live (every proposal
+      // is schema-validated downstream, so a corrupt-JSON host just yields 0)
+      provider: { order: ["deepseek", "alibaba", "deepinfra", "novita"], allow_fallbacks: true },
       max_tokens: 6000,
       response_format: { type: "json_object" },
       messages: [
