@@ -143,8 +143,11 @@ export async function proposeWithDeepSeek(
   championSummary: string,
   nProposals = 4,
 ): Promise<{ proposals: LlmProposal[]; usage: LlmUsage }> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 150_000); // ideation must never block the GP flywheel
   const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
+    signal: ctrl.signal,
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "deepseek/deepseek-chat",
@@ -159,6 +162,7 @@ export async function proposeWithDeepSeek(
       ],
     }),
   });
+  clearTimeout(timer);
   if (!resp.ok) throw new Error(`openrouter ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
   const data = await resp.json() as { choices: { message: { content: string } }[]; usage?: { prompt_tokens: number; completion_tokens: number } };
   const text = data.choices?.[0]?.message?.content ?? "";
