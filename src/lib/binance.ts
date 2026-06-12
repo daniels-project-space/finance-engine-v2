@@ -1,5 +1,9 @@
-// Binance USDT-M perp market data (public, no key). Falls back to spot klines
-// (api.binance.com) if fapi is geo-blocked — funding then unavailable (zeros).
+// Market data with provider chain: Binance USDT-M perp -> Binance spot -> Bybit
+// linear perp. Binance 451-blocks US datacenter IPs (Trigger.dev workers);
+// Bybit serves them, so cloud workers transparently land on Bybit while the
+// same code on EU hosts uses Binance.
+
+import { bybitFunding, bybitKlines, bybitLastPrice } from "./bybit";
 
 const FAPI = "https://fapi.binance.com";
 const SPOT = "https://api.binance.com";
@@ -21,11 +25,11 @@ async function fetchKlinesPage(base: string, path: string, symbol: string, inter
   return raw.map((r) => ({ t: Number(r[0]), o: Number(r[1]), h: Number(r[2]), l: Number(r[3]), c: Number(r[4]), v: Number(r[5]) }));
 }
 
-/** Paginate klines [startTime, endTime). Tries perp first, falls back to spot. */
+/** Paginate klines [startTime, endTime). Chain: binance perp -> binance spot -> bybit perp. */
 export async function fetchKlines(
   symbol: string, interval: string, startTime: number, endTime: number,
   log?: (m: string) => void,
-): Promise<{ rows: KlineRow[]; source: "perp" | "spot" }> {
+): Promise<{ rows: KlineRow[]; source: "perp" | "spot" | "bybit" }> {
   const tryFetch = async (base: string, path: string, src: "perp" | "spot") => {
     const rows: KlineRow[] = [];
     let cursor = startTime;
@@ -47,11 +51,17 @@ export async function fetchKlines(
     return await tryFetch(FAPI, "/fapi/v1/klines", "perp");
   } catch (err) {
     log?.(`fapi failed (${err instanceof Error ? err.message.slice(0, 100) : err}); falling back to spot`);
-    return tryFetch(SPOT, "/api/v3/klines", "spot");
+    try {
+      return await tryFetch(SPOT, "/api/v3/klines", "spot");
+    } catch (err2) {
+      log?.(`spot failed (${err2 instanceof Error ? err2.message.slice(0, 100) : err2}); falling back to bybit`);
+      const rows = await bybitKlines(symbol, interval, startTime, endTime, log);
+      return { rows, source: "bybit" as const };
+    }
   }
 }
 
-/** Funding rate history (8h cadence), paginated. Empty array if unavailable. */
+/** Funding rate history (8h cadence), paginated. Binance -> Bybit. Empty if unavailable. */
 export async function fetchFunding(
   symbol: string, startTime: number, endTime: number, log?: (m: string) => void,
 ): Promise<{ t: number[]; r: number[] }> {
@@ -69,7 +79,8 @@ export async function fetchFunding(
       pages++;
     }
   } catch (err) {
-    log?.(`funding unavailable for ${symbol}: ${err instanceof Error ? err.message.slice(0, 100) : err}`);
+    log?.(`binance funding unavailable for ${symbol}: ${err instanceof Error ? err.message.slice(0, 100) : err}`);
+    return bybitFunding(symbol, startTime, endTime, log);
   }
   return { t, r };
 }
@@ -80,7 +91,11 @@ export async function fetchLastPrice(symbol: string): Promise<number> {
     const d = await fetchJson(`${FAPI}/fapi/v1/ticker/price?symbol=${binSymbol(symbol)}`) as { price: string };
     return Number(d.price);
   } catch {
-    const d = await fetchJson(`${SPOT}/api/v3/ticker/price?symbol=${binSymbol(symbol)}`) as { price: string };
-    return Number(d.price);
+    try {
+      const d = await fetchJson(`${SPOT}/api/v3/ticker/price?symbol=${binSymbol(symbol)}`) as { price: string };
+      return Number(d.price);
+    } catch {
+      return bybitLastPrice(symbol);
+    }
   }
 }
