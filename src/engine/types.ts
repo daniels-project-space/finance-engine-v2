@@ -1,0 +1,167 @@
+// Core types for the finance-engine-v2 strategy engine.
+// A strategy is DATA (a JSON expression graph), never code.
+
+export type PriceField = "open" | "high" | "low" | "close" | "volume";
+
+export type IndicatorOp =
+  | "ema" | "sma" | "wma" | "rsi" | "atr" | "stdev" | "highest" | "lowest"
+  | "lag" | "zscore" | "slope" | "pctrank" | "median" | "roc";
+
+export type BinaryOp = "add" | "sub" | "mul" | "div" | "min2" | "max2";
+export type UnaryOp = "abs" | "neg" | "log" | "sign" | "sqrt";
+export type CompareOp = "gt" | "lt" | "crossover" | "crossunder";
+export type LogicOp = "and" | "or";
+
+export type Expr =
+  | { op: "price"; field: PriceField }
+  | { op: "const"; value: number }
+  | { op: "param"; name: string }
+  | { op: IndicatorOp; src: Expr; period: Expr }
+  | { op: BinaryOp; a: Expr; b: Expr }
+  | { op: UnaryOp; a: Expr }
+  | { op: CompareOp; a: Expr; b: Expr }
+  | { op: LogicOp; a: Expr; b: Expr }
+  | { op: "not"; a: Expr };
+
+export interface ParamSpec {
+  min: number;
+  max: number;
+  default: number;
+  int?: boolean;
+}
+
+export interface RiskSpec {
+  /** ATR-multiple hard stop from entry (omit = none) */
+  stopAtrMult?: number;
+  /** ATR-multiple trailing stop (omit = none) */
+  trailAtrMult?: number;
+  /** Annualized volatility target, e.g. 0.25 */
+  volTargetAnnual: number;
+  /** Max absolute weight (leverage) */
+  maxLeverage: number;
+}
+
+export interface StrategyDoc {
+  name: string;
+  /** WHY this should work — required from every generator (LLM or GP). */
+  hypothesis: string;
+  longEntry: Expr;
+  longExit: Expr;
+  shortEntry?: Expr;
+  shortExit?: Expr;
+  params: Record<string, ParamSpec>;
+  risk: RiskSpec;
+}
+
+/** Columnar OHLCV + funding, the on-disk/R2 format. Timestamps ms UTC, bar OPEN time. */
+export interface Bars {
+  symbol: string;
+  tf: string;
+  t: number[];
+  o: number[];
+  h: number[];
+  l: number[];
+  c: number[];
+  v: number[];
+  /** funding timestamps (ms) and rates, 8h cadence; optional */
+  fundingT?: number[];
+  fundingR?: number[];
+}
+
+export interface CostModel {
+  feeBps: number;   // taker fee per side
+  slipBps: number;  // expected slippage per side (half-spread + impact)
+}
+
+export interface BacktestOpts {
+  cost: CostModel;
+  /** bars per year for annualization (1h=8760, 4h=2190, 1d=365) */
+  ppy: number;
+  startEquity?: number;
+  /** multiply slippage (stress ramps) */
+  slipMult?: number;
+}
+
+export interface Trade {
+  entryI: number;
+  exitI: number;
+  dir: 1 | -1;
+  entryTs: number;
+  exitTs: number;
+  ret: number; // compounded strategy return over the trade
+}
+
+export interface Metrics {
+  bars: number;
+  totalReturn: number;
+  cagr: number;
+  sharpe: number;
+  sortino: number;
+  maxDD: number;
+  calmar: number;
+  trades: number;
+  winRate: number;
+  avgTradeRet: number;
+  exposure: number; // fraction of bars with nonzero weight
+  turnoverPerYear: number;
+  monthlyReturns: { ym: string; ret: number }[];
+}
+
+export interface BacktestResult {
+  /** per-bar strategy returns (net of costs+funding) */
+  ret: Float64Array;
+  equity: Float64Array;
+  weights: Float64Array;
+  metrics: Metrics;
+  trades: Trade[];
+}
+
+export interface GateFloors {
+  trainMinSharpe: number;        // 0.8
+  trainMinTradesPerYear: number; // 30
+  trainMaxDD: number;            // -0.35
+  wfMinMeanSharpe: number;       // 0.5
+  wfMinPctPositive: number;      // 0.55
+  wfWorstMonth: number;          // -0.15
+  wfMaxDD: number;               // -0.30
+  crossSymbolMinPositive: number;// 3 (of universe)
+  minDSR: number;                // 0.95
+  maxPermutationP: number;       // 0.05
+  stressSlipMultSurvive: number; // 3 (sharpe@3x > 50% base)
+  stressCrisisMaxDD: number;     // -0.40
+  sealedMinSharpe: number;       // 0.5
+  sealedMaxDD: number;           // -0.30
+  sealedMinTrades: number;       // 10
+  incubationDays: number;        // 30
+  championBeatRatio: number;     // 1.1
+}
+
+export const DEFAULT_FLOORS: GateFloors = {
+  trainMinSharpe: 0.8,
+  trainMinTradesPerYear: 30,
+  trainMaxDD: -0.35,
+  wfMinMeanSharpe: 0.5,
+  wfMinPctPositive: 0.55,
+  wfWorstMonth: -0.15,
+  wfMaxDD: -0.3,
+  crossSymbolMinPositive: 3,
+  minDSR: 0.95,
+  maxPermutationP: 0.05,
+  stressSlipMultSurvive: 3,
+  stressCrisisMaxDD: -0.4,
+  sealedMinSharpe: 0.5,
+  sealedMaxDD: -0.3,
+  sealedMinTrades: 10,
+  incubationDays: 30,
+  championBeatRatio: 1.1,
+};
+
+export const PPY: Record<string, number> = { "5m": 105120, "15m": 35040, "1h": 8760, "4h": 2190, "1d": 365 };
+
+/** per-symbol half-spread+impact estimate in bps (perp books, retail size) */
+export const SLIP_BPS: Record<string, number> = {
+  "BTC/USDT": 1.5, "ETH/USDT": 2, "SOL/USDT": 3, "BNB/USDT": 3.5, "XRP/USDT": 4,
+};
+export const DEFAULT_FEE_BPS = 5; // Binance USDT-M taker 0.05% (no VIP)
+
+export const COMPLEXITY_LIMITS = { maxNodes: 48, maxDepth: 10, maxParams: 6, maxPeriod: 500 };
