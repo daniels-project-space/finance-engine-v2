@@ -1,6 +1,6 @@
 import { ConvexHttpClient } from "convex/browser";
-import { api } from "/home/ubuntu/finance-engine-v2/convex/_generated/api";
-import { fetchSpx } from "/home/ubuntu/finance-engine-v2/src/lib/benchmark";
+import { api } from "../convex/_generated/api";
+import { fetchSpx } from "../src/lib/benchmark";
 async function main() {
   const cx = new ConvexHttpClient(process.env.CONVEX_URL as string);
   const spx = await fetchSpx(console.log);
