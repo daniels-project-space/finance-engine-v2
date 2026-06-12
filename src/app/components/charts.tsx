@@ -10,11 +10,14 @@ function fmtTime(ts: number): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
+let gradSeq = 0;
+
 export function LineChart({ series, height = 180, yLabel = "equity (×)", logScale = false }: {
   series: Series[]; height?: number; yLabel?: string; logScale?: boolean;
 }) {
   const all = series.filter((s) => s.curve?.t?.length > 1);
   if (!all.length) return <div className="hud py-4">no curve data</div>;
+  const gid = `lcg${gradSeq++ % 64}`;
   const width = 720, padL = 46, padR = 8, padT = 8, padB = 22;
   const t0 = Math.min(...all.map((s) => s.curve.t[0]));
   const t1 = Math.max(...all.map((s) => s.curve.t[s.curve.t.length - 1]));
@@ -27,8 +30,19 @@ export function LineChart({ series, height = 180, yLabel = "equity (×)", logSca
   const yTicks = [lo, (lo + hi) / 2, hi].map((v) => (logScale ? Math.exp(v) : v));
   const xTicks = [t0, (t0 + t1) / 2, t1];
 
+  const primarySeries = all[0];
+  const areaPts = primarySeries.curve.t.map((ts, i) => `${X(ts).toFixed(1)},${Y(primarySeries.curve.eq[i]).toFixed(1)}`).join(" ");
+  const baselineY = Y(logScale ? Math.exp(lo) : lo);
+
   return (
     <svg viewBox={`0 0 ${width} ${height}`} className="w-full" style={{ maxHeight: height }}>
+      <defs>
+        <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={primarySeries.color} stopOpacity="0.22" />
+          <stop offset="100%" stopColor={primarySeries.color} stopOpacity="0" />
+        </linearGradient>
+        <filter id={`${gid}glow`}><feGaussianBlur stdDeviation="1.8" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
+      </defs>
       {yTicks.map((v, i) => {
         const y = Y(v);
         return (
@@ -43,20 +57,70 @@ export function LineChart({ series, height = 180, yLabel = "equity (×)", logSca
       {xTicks.map((ts, i) => (
         <text key={i} x={X(ts)} y={height - 6} textAnchor={i === 0 ? "start" : i === 2 ? "end" : "middle"} fontSize="9" fill="#6b7a87" fontFamily="monospace">{fmtTime(ts)}</text>
       ))}
-      {all.map((s) => (
+      {/* gradient area under the primary series */}
+      <polygon points={`${X(primarySeries.curve.t[0]).toFixed(1)},${baselineY.toFixed(1)} ${areaPts} ${X(primarySeries.curve.t[primarySeries.curve.t.length - 1]).toFixed(1)},${baselineY.toFixed(1)}`} fill={`url(#${gid})`} />
+      {all.map((s, idx) => (
         <polyline key={s.name}
           points={s.curve.t.map((ts, i) => `${X(ts).toFixed(1)},${Y(s.curve.eq[i]).toFixed(1)}`).join(" ")}
-          fill="none" stroke={s.color} strokeWidth="1.5" strokeLinejoin="round" />
+          fill="none" stroke={s.color} strokeWidth={idx === 0 ? 1.8 : 1.3} strokeLinejoin="round"
+          opacity={idx === 0 ? 1 : 0.85} filter={idx === 0 ? `url(#${gid}glow)` : undefined} />
       ))}
+      {/* terminal value labels */}
+      {all.map((s, idx) => {
+        const lastT = s.curve.t[s.curve.t.length - 1];
+        const lastV = s.curve.eq[s.curve.eq.length - 1];
+        return (
+          <text key={`v${s.name}`} x={Math.min(X(lastT) + 4, width - 36)} y={Y(lastV) + 3 + idx * 0} fontSize="9" fill={s.color} fontFamily="monospace">{lastV.toFixed(2)}</text>
+        );
+      })}
       {/* legend */}
       {all.map((s, i) => (
         <g key={`l${s.name}`}>
-          <rect x={padL + 4 + i * 120} y={padT} width="8" height="3" fill={s.color} />
-          <text x={padL + 16 + i * 120} y={padT + 5} fontSize="9" fill="#9fb0bd" fontFamily="monospace">{s.name}</text>
+          <rect x={padL + 4 + i * 150} y={padT} width="8" height="3" fill={s.color} />
+          <text x={padL + 16 + i * 150} y={padT + 5} fontSize="9" fill="#9fb0bd" fontFamily="monospace">{s.name}</text>
         </g>
       ))}
       <text x={8} y={12} fontSize="8" fill="#6b7a87" fontFamily="monospace">{yLabel}</text>
     </svg>
+  );
+}
+
+// ---------------------------------------------------------------- gauntlet trail
+const TRAIL: { key: string; label: string }[] = [
+  { key: "S0", label: "S0" }, { key: "S1", label: "S1" }, { key: "S2", label: "S2" },
+  { key: "S3", label: "S3" }, { key: "S4", label: "S4" }, { key: "S5", label: "S5" },
+  { key: "S5b", label: "S5b" }, { key: "S6", label: "S6" }, { key: "S7", label: "S7" },
+];
+const TRAIL_ORDER = ["S0", "S1", "S2", "S3", "S4", "S5", "S5b", "S6", "S7"];
+
+/** Visual gauntlet outcome: green = passed, red = died here, dark = never reached. */
+export function GauntletTrail({ failedStage, stage }: { failedStage?: string; stage: string }) {
+  const aliveStages = new Set(["incubating", "eligible", "champion", "sealed_passed", "archived", "demoted"]);
+  const survived = aliveStages.has(stage);
+  let deathIdx = -1;
+  if (failedStage) {
+    const norm = failedStage.startsWith("S5b") ? "S5b" : failedStage.startsWith("S7") ? "S7" : failedStage.split("-")[0];
+    deathIdx = TRAIL_ORDER.indexOf(norm);
+  }
+  return (
+    <div className="flex items-center gap-1">
+      {TRAIL.map((s, i) => {
+        const state = survived ? (i <= 7 ? "pass" : stage === "champion" || stage === "eligible" ? "pass" : "active")
+          : deathIdx === -1 ? "pending"
+          : i < deathIdx ? "pass" : i === deathIdx ? "dead" : "unreached";
+        return (
+          <div key={s.key} className="flex flex-col items-center gap-0.5">
+            <div className={`w-7 h-2 rounded-sm ${
+              state === "pass" ? "bg-gradient-to-r from-emerald-700 to-emerald-500" :
+              state === "dead" ? "bg-gradient-to-r from-red-700 to-red-500 shadow-[0_0_6px_#f4604f88]" :
+              state === "active" ? "bg-gradient-to-r from-amber-700 to-amber-400 animate-pulse" :
+              "bg-edge"
+            }`} />
+            <span className={`num text-[8px] ${state === "dead" ? "text-down" : state === "pass" ? "text-up/70" : "text-dim"}`}>{s.label}</span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

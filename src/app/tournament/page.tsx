@@ -3,7 +3,8 @@
 import { useQuery } from "convex/react";
 import Link from "next/link";
 import { api } from "../../../convex/_generated/api";
-import { MiniCurve, type Curve } from "../components/charts";
+import { GauntletTrail, LineChart, MiniCurve, type Curve } from "../components/charts";
+import { SOURCE_COLORS } from "../components/widgets";
 import { StageBadge, fmtNum, fmtPct } from "../components/ui";
 
 interface Parsed {
@@ -37,7 +38,7 @@ function Row({ r, rank }: { r: Parsed; rank: number }) {
         <Link href={`/candidates/${r.id}`} className="hover:text-up">{r.name}</Link>
         <div className="num text-[10px] text-dim">{r.source} · {r.tf}{r.lev ? ` · ${r.lev}` : ""}{r.failedStage ? ` · out at ${r.failedStage}` : ""}</div>
       </td>
-      <td><StageBadge stage={r.stage} /></td>
+      <td><GauntletTrail failedStage={r.failedStage} stage={r.stage} /></td>
       <td className="px-2"><MiniCurve curve={r.wfCurve} /></td>
       <td className="num text-right text-gold">{fmtNum(r.composite)}</td>
       <td className="num text-right text-up">{fmtNum(r.m.portOosSharpe)}</td>
@@ -76,12 +77,43 @@ export default function TournamentPage() {
         </div>
       </section>
 
+      {/* ============ podium ============ */}
+      {parsed.length >= 3 && (
+        <section className="grid md:grid-cols-3 gap-4">
+          {[parsed[1], parsed[0], parsed[2]].map((r, slot) => {
+            const rank = slot === 1 ? 1 : slot === 0 ? 2 : 3;
+            const medal = rank === 1 ? "#e8b34b" : rank === 2 ? "#9fb0bd" : "#b0793f";
+            return (
+              <Link key={r.id} href={`/candidates/${r.id}`}
+                className={`panel p-4 relative overflow-hidden hover:border-dim transition-colors ${rank === 1 ? "md:-translate-y-2" : ""}`}>
+                <div className="absolute inset-0 pointer-events-none" style={{ background: `radial-gradient(420px 140px at 50% -30%, ${medal}1f, transparent)` }} />
+                <div className="relative">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="num text-2xl font-bold" style={{ color: medal }}>#{rank}</span>
+                    <span className="num text-[10px] px-1.5 py-0.5 rounded border border-edge" style={{ color: SOURCE_COLORS[r.source] }}>{r.source} · {r.tf}</span>
+                  </div>
+                  <div className="font-semibold truncate">{r.name}</div>
+                  <div className="num text-[10px] text-dim mb-2">{r.failedStage ? `out at ${r.failedStage}` : r.stage}</div>
+                  {r.wfCurve ? <LineChart series={[{ name: "WF OOS", color: medal, curve: r.wfCurve }]} height={110} yLabel="" /> : <div className="hud py-8 text-center">no curve</div>}
+                  <div className="flex justify-between mt-2 num text-xs">
+                    <span className="text-gold">comp {fmtNum(r.composite)}</span>
+                    <span className="text-dim">wf {fmtNum(r.m.wfPooledSharpe)}</span>
+                    <span className="text-dim">dd {fmtPct(r.m.fullMaxDD, 0)}</span>
+                    <span className="text-dim">win {fmtPct(r.m.winRate, 0)}</span>
+                  </div>
+                </div>
+              </Link>
+            );
+          })}
+        </section>
+      )}
+
       <section className="panel p-5">
         <div className="hud mb-3">League — alive (gauntlet + sealed holdout passed)</div>
         {league.length ? (
           <table className="w-full text-sm">
             <thead><tr className="hud text-left">
-              <th className="pb-2">#</th><th>strategy</th><th>stage</th><th className="px-2">WF OOS equity</th>
+              <th className="pb-2">#</th><th>strategy</th><th>gauntlet trail</th><th className="px-2">WF OOS equity</th>
               <th className="text-right">comp</th><th className="text-right">PORT</th><th className="text-right">BTC wf</th><th className="text-right">sealed</th>
               <th className="text-right">full</th><th className="text-right">maxDD</th><th className="text-right">win%</th>
               <th className="text-right">trades</th><th className="text-right">DSR</th>
@@ -100,7 +132,7 @@ export default function TournamentPage() {
         {qualifiers.length ? (
           <table className="w-full text-sm">
             <thead><tr className="hud text-left">
-              <th className="pb-2">#</th><th>strategy</th><th>stage</th><th className="px-2">WF OOS equity</th>
+              <th className="pb-2">#</th><th>strategy</th><th>gauntlet trail</th><th className="px-2">WF OOS equity</th>
               <th className="text-right">comp</th><th className="text-right">PORT</th><th className="text-right">BTC wf</th><th className="text-right">sealed</th>
               <th className="text-right">full</th><th className="text-right">maxDD</th><th className="text-right">win%</th>
               <th className="text-right">trades</th><th className="text-right">DSR</th>

@@ -4,7 +4,7 @@ import { useQuery } from "convex/react";
 import { use } from "react";
 import { api } from "../../../../convex/_generated/api";
 import type { Id } from "../../../../convex/_generated/dataModel";
-import { DrawdownChart, LineChart, type Curve } from "../../components/charts";
+import { DrawdownChart, GauntletTrail, LineChart, type Curve } from "../../components/charts";
 import { Sparkline, StageBadge, Stat, fmtNum, fmtPct, timeAgo } from "../../components/ui";
 
 export default function CandidateDetail({ params }: { params: Promise<{ id: string }> }) {
@@ -31,6 +31,7 @@ export default function CandidateDetail({ params }: { params: Promise<{ id: stri
           <span className="num text-dim text-xs">{cand.source} · {timeAgo(cand.createdAt)} · {cand.hash.slice(0, 10)}</span>
         </div>
         <p className="text-dim mt-2 max-w-3xl">{cand.hypothesis}</p>
+        <div className="mt-4"><GauntletTrail failedStage={cand.failedStage} stage={cand.stage} /></div>
         {cand.failedReason && <p className="text-down mt-2 text-sm num">✗ {cand.failedStage}: {cand.failedReason}</p>}
         <div className="flex gap-8 mt-5 flex-wrap">
           <Stat label="Composite" value={fmtNum(cand.composite)} tone="gold" />
