@@ -26,17 +26,42 @@ export interface StageOutcome {
   durationMs: number;
 }
 
+export interface Curve { t: number[]; eq: number[] }
+
+/** Downsample an equity path to ≤maxPts points for dashboard storage. */
+export function downsampleCurve(ts: number[], eq: Float64Array | number[], fromI: number, toI: number, maxPts = 300): Curve {
+  const n = toI - fromI + 1;
+  const step = Math.max(1, Math.ceil(n / maxPts));
+  const t: number[] = [], e: number[] = [];
+  for (let i = fromI; i <= toI; i += step) {
+    t.push(ts[i]);
+    e.push(Number((eq as Float64Array)[i]));
+  }
+  if (t[t.length - 1] !== ts[toI]) { t.push(ts[toI]); e.push(Number((eq as Float64Array)[toI])); }
+  return { t, eq: e };
+}
+
 export interface GauntletReport {
   passed: boolean;
   failedStage?: string;
   failedReason?: string;
   stages: StageOutcome[];
   bestParams?: Record<string, number>;
+  /** downsampled equity paths for the dashboard */
+  curves?: { full?: Curve; wf?: Curve };
   metrics: {
     trainSharpe?: number;
     wfPooledSharpe?: number;
     wfPctPositive?: number;
+    wfWorstMonth?: number;
+    wfMaxDD?: number;
     fullSharpe?: number;
+    fullSortino?: number;
+    fullMaxDD?: number;
+    fullCagr?: number;
+    winRate?: number;
+    fullTrades?: number;
+    exposure?: number;
     dsr?: number;
     permutationP?: number;
     bootstrapP5?: number;
@@ -68,9 +93,10 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
   const stages: StageOutcome[] = [];
   const metrics: GauntletReport["metrics"] = {};
   const t0 = () => Date.now();
+  const curves: GauntletReport["curves"] = {};
   const fail = (stage: string, reason: string, started: number, detail?: unknown): GauntletReport => {
     stages.push({ stage, passed: false, reason, detail, durationMs: Date.now() - started });
-    return { passed: false, failedStage: stage, failedReason: reason, stages, metrics };
+    return { passed: false, failedStage: stage, failedReason: reason, stages, metrics, curves };
   };
 
   const { doc, primary, floors } = g;
@@ -104,6 +130,17 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
   const wf = walkForward(doc, primary, opts, { trainMonths: 12, stepMonths: 1, tuneTrials: 40, endTs: g.sealTs });
   metrics.wfPooledSharpe = wf.pooledSharpe;
   metrics.wfPctPositive = wf.pctPositive;
+  metrics.wfWorstMonth = wf.worstWindowRet;
+  metrics.wfMaxDD = wf.pooledMaxDD;
+  // WF OOS equity curve (timestamps spread across the OOS span)
+  if (wf.pooledRet.length > 10 && wf.windows.length) {
+    const eq = new Float64Array(wf.pooledRet.length);
+    let acc = 1;
+    for (let i = 0; i < wf.pooledRet.length; i++) { acc *= 1 + wf.pooledRet[i]; eq[i] = acc; }
+    const t0w = wf.windows[0].testStartTs, t1w = wf.windows[wf.windows.length - 1].testEndTs;
+    const ts = Array.from({ length: eq.length }, (_, i) => t0w + ((t1w - t0w) * i) / Math.max(1, eq.length - 1));
+    curves.wf = downsampleCurve(ts, eq, 0, eq.length - 1, 240);
+  }
   if (wf.windows.length < 12) return fail("S3-walkforward", `only ${wf.windows.length} WF windows`, started, summarizeWf(wf));
   if (wf.pooledSharpe < floors.wfMinMeanSharpe) return fail("S3-walkforward", `OOS pooled sharpe ${wf.pooledSharpe.toFixed(2)} < ${floors.wfMinMeanSharpe}`, started, summarizeWf(wf));
   if (wf.pctPositive < floors.wfMinPctPositive) return fail("S3-walkforward", `${(wf.pctPositive * 100).toFixed(0)}% positive months < ${floors.wfMinPctPositive * 100}%`, started, summarizeWf(wf));
@@ -132,6 +169,13 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
   const finalParams = medianParams(doc, wf);
   const full = runBacktest(doc, primary, finalParams, opts, { startI: 1, endI: devEndI });
   metrics.fullSharpe = full.metrics.sharpe;
+  metrics.fullSortino = full.metrics.sortino;
+  metrics.fullMaxDD = full.metrics.maxDD;
+  metrics.fullCagr = full.metrics.cagr;
+  metrics.winRate = full.metrics.winRate;
+  metrics.fullTrades = full.metrics.trades;
+  metrics.exposure = full.metrics.exposure;
+  curves.full = downsampleCurve(primary.t, full.equity, 1, devEndI, 300);
   const d = dsr(full.ret, 2, devEndI, Math.max(g.nTrialsTotal, 10));
   metrics.dsr = d;
   if (d < floors.minDSR) return fail("S5-stats", `DSR ${d.toFixed(3)} < ${floors.minDSR} (deflated for ${g.nTrialsTotal} trials)`, started, { dsr: d });
@@ -153,33 +197,36 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
   stages.push({ stage: "S5b-stress", passed: true, durationMs: Date.now() - started, detail: slimStress(stress) });
 
   metrics.composite = 0.5 * (metrics.wfPooledSharpe ?? 0) + 0.2 * (metrics.fullSharpe ?? 0); // sealed adds 0.3 later
-  return { passed: true, stages, metrics, bestParams: finalParams };
+  return { passed: true, stages, metrics, bestParams: finalParams, curves };
 }
 
 /** S6 sealed holdout math (one-shot enforcement lives in the task layer). */
 export function evaluateSealed(
   doc: StrategyDoc, bars: Bars, params: Record<string, number>, sealTs: number, floors: GateFloors,
-): { passed: boolean; reason?: string; sharpe: number; ret: number; maxDD: number; trades: number } {
+): { passed: boolean; reason?: string; sharpe: number; ret: number; maxDD: number; trades: number; curve: Curve } {
   const opts = optsFor(bars.symbol, bars.tf);
   const sealI = indexOfTs(bars.t, sealTs);
   const endI = bars.t.length - 1;
   const warmStart = Math.max(1, sealI - 1000);
   const res = runBacktest(doc, bars, params, opts, { startI: warmStart, endI });
+  const sealedEq = new Float64Array(endI + 1).fill(1);
   let s = 0, sq = 0, g = 1, eq = 1, peak = 1, dd = 0, trades = 0;
   for (let i = sealI; i <= endI; i++) {
     const r = res.ret[i]; s += r; sq += r * r; g *= 1 + r;
     eq *= 1 + r; if (eq > peak) peak = eq; const dde = eq / peak - 1; if (dde < dd) dd = dde;
+    sealedEq[i] = eq;
   }
+  const curve = downsampleCurve(bars.t, sealedEq, sealI, endI, 150);
   for (const tr of res.trades) if (tr.entryI >= sealI) trades++;
   const n = Math.max(1, endI - sealI + 1);
   const mean = s / n, sd = Math.sqrt(Math.max(0, sq / n - mean * mean));
   const sharpe = sd > 1e-12 ? (mean / sd) * Math.sqrt(opts.ppy) : 0;
   const ret = g - 1;
-  if (trades < floors.sealedMinTrades) return { passed: false, reason: `${trades} sealed trades < ${floors.sealedMinTrades}`, sharpe, ret, maxDD: dd, trades };
-  if (sharpe < floors.sealedMinSharpe) return { passed: false, reason: `sealed sharpe ${sharpe.toFixed(2)} < ${floors.sealedMinSharpe}`, sharpe, ret, maxDD: dd, trades };
-  if (ret <= 0) return { passed: false, reason: `sealed return ${(ret * 100).toFixed(1)}% <= 0`, sharpe, ret, maxDD: dd, trades };
-  if (dd < floors.sealedMaxDD) return { passed: false, reason: `sealed maxDD ${(dd * 100).toFixed(0)}%`, sharpe, ret, maxDD: dd, trades };
-  return { passed: true, sharpe, ret, maxDD: dd, trades };
+  if (trades < floors.sealedMinTrades) return { passed: false, reason: `${trades} sealed trades < ${floors.sealedMinTrades}`, sharpe, ret, maxDD: dd, trades, curve };
+  if (sharpe < floors.sealedMinSharpe) return { passed: false, reason: `sealed sharpe ${sharpe.toFixed(2)} < ${floors.sealedMinSharpe}`, sharpe, ret, maxDD: dd, trades, curve };
+  if (ret <= 0) return { passed: false, reason: `sealed return ${(ret * 100).toFixed(1)}% <= 0`, sharpe, ret, maxDD: dd, trades, curve };
+  if (dd < floors.sealedMaxDD) return { passed: false, reason: `sealed maxDD ${(dd * 100).toFixed(0)}%`, sharpe, ret, maxDD: dd, trades, curve };
+  return { passed: true, sharpe, ret, maxDD: dd, trades, curve };
 }
 
 function summarizeWf(wf: WfReport) {

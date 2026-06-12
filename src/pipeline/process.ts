@@ -1,0 +1,212 @@
+// Shared pipeline logic — the SAME code runs in Trigger.dev tasks and in
+// local/manual kickoff scripts, so cloud and manual cycles are identical.
+
+import type { ConvexHttpClient } from "convex/browser";
+import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
+import { mergeConfig, todayKey, type AppConfig } from "../lib/appConfig";
+import { loadBars } from "../lib/data";
+import { artifactKey, putJsonGz } from "../lib/storage";
+import { canonicalHash, familyHash, validateStrategy } from "../engine/dsl";
+import { crossoverStrategies, mutateStrategy, randomStrategy } from "../engine/evolve";
+import { evaluateSealed, runGauntlet } from "../engine/gauntlet";
+import { propose } from "../engine/llm";
+import type { Bars, StrategyDoc } from "../engine/types";
+
+export type Log = (m: string) => void;
+
+export async function getAppConfig(cx: ConvexHttpClient): Promise<AppConfig> {
+  return mergeConfig(await cx.query(api.pipeline.getConfig, { key: "app" }));
+}
+
+// ---------------------------------------------------------------- generation
+export interface GenSummary { gp: number; fresh: number; llm: number; duplicates: number; queued: number; llmSkipped: string; ids: string[] }
+
+export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: Log, scale = 1): Promise<GenSummary> {
+  const summary: GenSummary = { gp: 0, fresh: 0, llm: 0, duplicates: 0, queued: 0, llmSkipped: "", ids: [] };
+
+  const todayCount = await cx.query(api.pipeline.getCounter, { key: todayKey("candidates") });
+  if (todayCount >= cfg.evo.maxCandidatesPerDay) { summary.llmSkipped = "daily candidate cap"; return summary; }
+
+  const champion = await cx.query(api.candidates.champion, {});
+  const leaders = await cx.query(api.candidates.leaderboard, { limit: 12 });
+  const parents = [...(champion ? [champion] : []), ...leaders.filter((l) => l._id !== champion?._id)]
+    .map((c) => ({ doc: JSON.parse(c.dsl) as StrategyDoc, id: c._id as string }));
+
+  const seedBase = (await cx.mutation(api.pipeline.bumpCounter, { key: "seed", by: 1 })) * 7919;
+  const proposals: { doc: StrategyDoc; source: string; parentIds?: string[] }[] = [];
+
+  const gpN = Math.round(cfg.evo.batchGp * scale);
+  for (let i = 0; i < gpN && parents.length > 0; i++) {
+    const seed = seedBase + i;
+    if (parents.length >= 2 && i % 4 === 3) {
+      const a = parents[i % parents.length], b = parents[(i + 1) % parents.length];
+      proposals.push({ doc: crossoverStrategies(a.doc, b.doc, seed), source: "crossover", parentIds: [a.id, b.id] });
+    } else {
+      const p = parents[i % parents.length];
+      const { doc } = mutateStrategy(p.doc, seed);
+      proposals.push({ doc, source: "mutation", parentIds: [p.id] });
+    }
+    summary.gp++;
+  }
+
+  const freshN = Math.round((parents.length === 0 ? cfg.evo.batchGp + cfg.evo.batchFresh : cfg.evo.batchFresh) * scale);
+  for (let i = 0; i < freshN; i++) {
+    proposals.push({ doc: randomStrategy(seedBase + 100_000 + i), source: "gp" });
+    summary.fresh++;
+  }
+
+  // LLM lane (budget-gated; Fable -> DeepSeek fallback)
+  const spentCents = await cx.query(api.pipeline.getCounter, { key: todayKey("llm_usd_cents") });
+  const budgetLeft = cfg.llmDailyBudgetUsd - spentCents / 100;
+  if (budgetLeft > 0.05) {
+    const lessons = (await cx.query(api.pipeline.recentLessons, { limit: 25 })).map((l) => l.text);
+    const championSummary = champion
+      ? `"${champion.name}" composite=${champion.composite?.toFixed(2)} hypothesis: ${champion.hypothesis}`
+      : "none yet";
+    const result = await propose(
+      { anthropic: process.env.ANTHROPIC_API_KEY, openrouter: process.env.OPENROUTER_API_KEY },
+      budgetLeft, lessons, "", championSummary, cfg.evo.batchLlm,
+    );
+    if ("skipped" in result) summary.llmSkipped = result.skipped;
+    else {
+      await cx.mutation(api.pipeline.bumpCounter, { key: todayKey("llm_usd_cents"), by: Math.ceil(result.usage.costUsd * 100) });
+      for (const p of result.proposals) {
+        p.doc.hypothesis = `${p.doc.hypothesis} [LLM: ${result.usage.model}] ${p.rationale.slice(0, 100)}`;
+        proposals.push({ doc: p.doc, source: "llm" });
+        summary.llm++;
+      }
+      log(`LLM ${result.usage.model}: ${result.proposals.length} proposals, $${result.usage.costUsd.toFixed(3)}`);
+    }
+  } else summary.llmSkipped = "daily budget exhausted";
+
+  // validate, dedupe, register
+  for (const p of proposals) {
+    if (validateStrategy(p.doc).length > 0) continue;
+    const hash = canonicalHash(p.doc);
+    if (await cx.query(api.candidates.hashExists, { hash })) { summary.duplicates++; continue; }
+    const fam = familyHash(p.doc);
+    const famCount = await cx.query(api.candidates.familySeenCount, { familyHash: fam });
+    if (famCount >= 10) { summary.duplicates++; continue; }
+    const { id, duplicate } = await cx.mutation(api.candidates.create, {
+      name: p.doc.name, source: p.source, parentIds: p.parentIds,
+      dsl: JSON.stringify(p.doc), hash, familyHash: fam, hypothesis: p.doc.hypothesis,
+    });
+    if (duplicate) { summary.duplicates++; continue; }
+    await cx.mutation(api.candidates.updateStage, { id, stage: "queued" });
+    await cx.mutation(api.pipeline.bumpCounter, { key: todayKey("candidates"), by: 1 });
+    summary.ids.push(id as unknown as string);
+    summary.queued++;
+  }
+  return summary;
+}
+
+// ---------------------------------------------------------------- gauntlet
+export interface ProcessResult { passed: boolean; stage?: string; composite?: number }
+
+export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: string, log: Log): Promise<ProcessResult> {
+  const candidateId = candidateIdRaw as Id<"candidates">;
+  const cand = await cx.query(api.candidates.get, { id: candidateId });
+  if (!cand) throw new Error("candidate not found");
+  const cfg = await getAppConfig(cx);
+  const doc = JSON.parse(cand.dsl) as StrategyDoc;
+  const sealTs = Date.parse(cfg.sealDate);
+
+  await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "gauntlet" });
+
+  if (await cx.query(api.pipeline.isPenalized, { familyHash: cand.familyHash })) {
+    await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: "S1-penalty", failedReason: "family in penalty box" });
+    return { passed: false, stage: "S1-penalty" };
+  }
+
+  const primary = await loadBars(cfg.primarySymbol, cfg.tf);
+  if (!primary || primary.t.length < 20_000) throw new Error("primary bars missing/short — run ingest first");
+  const others: Bars[] = [];
+  for (const sym of cfg.universe) {
+    if (sym === cfg.primarySymbol) continue;
+    const b = await loadBars(sym, cfg.tf);
+    if (b && b.t.length > 15_000) others.push(b);
+  }
+  const primary4h = await loadBars(cfg.primarySymbol, "4h");
+  if (primary4h && primary4h.t.length > 5_000) others.push(primary4h);
+
+  const nTrials = await cx.query(api.pipeline.getCounter, { key: "trials_total" });
+  await cx.mutation(api.pipeline.bumpCounter, { key: "trials_total", by: 1 });
+
+  const report = runGauntlet({ doc, primary, others, sealTs, floors: cfg.floors, nTrialsTotal: Math.max(nTrials, 10), log });
+
+  for (const s of report.stages) {
+    await cx.mutation(api.pipeline.addGateReport, {
+      candidateId, stage: s.stage, passed: s.passed, reason: s.reason,
+      report: JSON.stringify(s.detail ?? {}).slice(0, 20_000), durationMs: s.durationMs,
+    });
+  }
+  await putJsonGz(artifactKey(cand.hash, "gauntlet"), report);
+  const curvesJson = (extra?: object) => JSON.stringify({ ...(report.curves ?? {}), ...(extra ?? {}) });
+
+  if (!report.passed) {
+    // partial composite so near-misses still rank in the tournament
+    const partial = report.metrics.wfPooledSharpe !== undefined
+      ? 0.5 * report.metrics.wfPooledSharpe + 0.2 * (report.metrics.fullSharpe ?? 0)
+      : undefined;
+    await cx.mutation(api.candidates.updateStage, {
+      id: candidateId, stage: "failed",
+      failedStage: report.failedStage, failedReason: report.failedReason,
+      metrics: JSON.stringify(report.metrics), curves: curvesJson(), composite: partial,
+    });
+    await cx.mutation(api.pipeline.addLesson, {
+      source: cand.source, candidateId, stage: report.failedStage,
+      text: `FAILED ${report.failedStage}: "${cand.name}" (${cand.hypothesis.slice(0, 90)}) — ${report.failedReason}`,
+    });
+    const familySeen = await cx.query(api.candidates.familySeenCount, { familyHash: cand.familyHash });
+    if (familySeen >= 4) {
+      await cx.mutation(api.pipeline.penalize, { familyHash: cand.familyHash, reason: `family failed ${familySeen}x`, days: 7 });
+    }
+    log(`FAILED at ${report.failedStage}: ${report.failedReason}`);
+    return { passed: false, stage: report.failedStage };
+  }
+
+  // S6 sealed holdout, one-shot per hash
+  const claim = await cx.mutation(api.pipeline.claimHoldout, { hash: cand.hash, sealTs });
+  if (!claim.allowed) {
+    await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: "S6-sealed", failedReason: "seal already consumed for this hash" });
+    return { passed: false, stage: "S6-sealed" };
+  }
+  const sealed = evaluateSealed(doc, primary, report.bestParams ?? {}, sealTs, cfg.floors);
+  await cx.mutation(api.pipeline.recordHoldout, { hash: cand.hash, result: JSON.stringify({ ...sealed, curve: undefined }), passed: sealed.passed });
+  await cx.mutation(api.pipeline.addGateReport, {
+    candidateId, stage: "S6-sealed", passed: sealed.passed, reason: sealed.reason,
+    report: JSON.stringify({ sharpe: sealed.sharpe, ret: sealed.ret, maxDD: sealed.maxDD, trades: sealed.trades }), durationMs: 0,
+  });
+
+  const composite = 0.5 * (report.metrics.wfPooledSharpe ?? 0) + 0.3 * sealed.sharpe + 0.2 * (report.metrics.fullSharpe ?? 0);
+  const metrics = { ...report.metrics, sealedSharpe: sealed.sharpe, sealedRet: sealed.ret, sealedMaxDD: sealed.maxDD, sealedTrades: sealed.trades, composite };
+
+  if (!sealed.passed) {
+    await cx.mutation(api.candidates.updateStage, {
+      id: candidateId, stage: "failed", failedStage: "S6-sealed", failedReason: sealed.reason,
+      metrics: JSON.stringify(metrics), bestParams: JSON.stringify(report.bestParams ?? {}),
+      curves: curvesJson({ sealed: sealed.curve }), composite,
+    });
+    await cx.mutation(api.pipeline.addLesson, {
+      source: cand.source, candidateId, stage: "S6-sealed",
+      text: `SEALED-FAIL: "${cand.name}" passed S0–S5b then failed the sealed holdout (${sealed.reason}). In-sample machinery is fitting noise in this family.`,
+    });
+    await cx.mutation(api.pipeline.penalize, { familyHash: cand.familyHash, reason: "sealed holdout fail", days: 14 });
+    return { passed: false, stage: "S6-sealed" };
+  }
+
+  await cx.mutation(api.paper.ensureAccount, { candidateId, startEquity: cfg.paperStartEquity });
+  await cx.mutation(api.candidates.updateStage, {
+    id: candidateId, stage: "incubating",
+    metrics: JSON.stringify(metrics), bestParams: JSON.stringify(report.bestParams ?? {}),
+    curves: curvesJson({ sealed: sealed.curve }),
+    composite, incubationStartedAt: Date.now(),
+  });
+  await cx.mutation(api.pipeline.addLesson, {
+    source: cand.source, candidateId,
+    text: `PASSED full gauntlet + sealed holdout: "${cand.name}" (composite ${composite.toFixed(2)}, sealed sharpe ${sealed.sharpe.toFixed(2)}). Mechanism: ${cand.hypothesis.slice(0, 120)}`,
+  });
+  log(`PASSED -> incubating, composite=${composite.toFixed(2)}`);
+  return { passed: true, composite };
+}

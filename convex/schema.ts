@@ -17,7 +17,8 @@ export default defineSchema({
     failedStage: v.optional(v.string()),
     failedReason: v.optional(v.string()),
     bestParams: v.optional(v.string()),   // JSON
-    metrics: v.optional(v.string()),      // JSON GauntletReport.metrics + sealed
+    metrics: v.optional(v.string()),      // JSON GauntletReport.metrics + sealed + trade stats
+    curves: v.optional(v.string()),       // JSON {full,wf,sealed} downsampled equity paths
     composite: v.optional(v.number()),
     incubationStartedAt: v.optional(v.number()),
     createdAt: v.number(),

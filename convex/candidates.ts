@@ -21,6 +21,7 @@ export const updateStage = mutation({
     id: v.id("candidates"), stage: v.string(),
     failedStage: v.optional(v.string()), failedReason: v.optional(v.string()),
     bestParams: v.optional(v.string()), metrics: v.optional(v.string()),
+    curves: v.optional(v.string()),
     composite: v.optional(v.number()), incubationStartedAt: v.optional(v.number()),
   },
   handler: async (ctx, { id, ...rest }) => {
@@ -49,6 +50,15 @@ export const leaderboard = query({
   handler: async (ctx, { limit }) => {
     const rows = await ctx.db.query("candidates").withIndex("by_composite").order("desc").take((limit ?? 20) * 2);
     return rows.filter((r) => r.composite !== undefined && !["failed", "graveyard", "archived"].includes(r.stage)).slice(0, limit ?? 20);
+  },
+});
+
+/** Tournament board: every scored candidate (including near-miss failures), ranked. */
+export const tournament = query({
+  args: { limit: v.optional(v.number()) },
+  handler: async (ctx, { limit }) => {
+    const rows = await ctx.db.query("candidates").withIndex("by_composite").order("desc").take(limit ?? 80);
+    return rows.filter((r) => r.composite !== undefined);
   },
 });
 

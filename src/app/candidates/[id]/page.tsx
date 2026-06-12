@@ -4,6 +4,7 @@ import { useQuery } from "convex/react";
 import { use } from "react";
 import { api } from "../../../../convex/_generated/api";
 import type { Id } from "../../../../convex/_generated/dataModel";
+import { DrawdownChart, LineChart, type Curve } from "../../components/charts";
 import { Sparkline, StageBadge, Stat, fmtNum, fmtPct, timeAgo } from "../../components/ui";
 
 export default function CandidateDetail({ params }: { params: Promise<{ id: string }> }) {
@@ -18,6 +19,8 @@ export default function CandidateDetail({ params }: { params: Promise<{ id: stri
   if (!cand) return <div className="hud">loading…</div>;
   const metrics = cand.metrics ? (JSON.parse(cand.metrics) as Record<string, number>) : {};
   const equity = snaps ? [...snaps].reverse().map((s) => s.equity) : [];
+  let curves: { full?: Curve; wf?: Curve; sealed?: Curve } = {};
+  try { curves = cand.curves ? JSON.parse(cand.curves) : {}; } catch {}
 
   return (
     <div className="space-y-6">
@@ -34,6 +37,10 @@ export default function CandidateDetail({ params }: { params: Promise<{ id: stri
           <Stat label="Train Sharpe" value={fmtNum(metrics.trainSharpe)} />
           <Stat label="WF OOS Sharpe" value={fmtNum(metrics.wfPooledSharpe)} />
           <Stat label="WF positive months" value={fmtPct(metrics.wfPctPositive, 0)} />
+          <Stat label="Max DD" value={fmtPct(metrics.fullMaxDD, 0)} tone={(metrics.fullMaxDD ?? 0) < -0.25 ? "down" : undefined} />
+          <Stat label="Win rate" value={fmtPct(metrics.winRate, 0)} />
+          <Stat label="CAGR" value={fmtPct(metrics.fullCagr, 1)} tone={(metrics.fullCagr ?? 0) > 0 ? "up" : "down"} />
+          <Stat label="Trades" value={String(metrics.fullTrades ?? "—")} />
           <Stat label="DSR" value={fmtNum(metrics.dsr, 3)} />
           <Stat label="Permutation p" value={fmtNum(metrics.permutationP, 3)} />
           <Stat label="Bootstrap p5" value={fmtNum(metrics.bootstrapP5)} />
@@ -41,17 +48,44 @@ export default function CandidateDetail({ params }: { params: Promise<{ id: stri
         </div>
       </section>
 
-      {acct && (
-        <section className="panel p-5 flex gap-10 items-end flex-wrap">
-          <Stat label="Paper equity" value={`$${acct.equity.toFixed(0)}`} tone={acct.equity >= 10000 ? "up" : "down"} />
-          <Stat label="Peak" value={`$${acct.peakEquity.toFixed(0)}`} />
-          <Stat label="Status" value={acct.halted ? `HALTED: ${acct.haltReason}` : "live"} tone={acct.halted ? "down" : "up"} />
-          <div>
-            <div className="hud mb-1">Equity curve</div>
-            <Sparkline values={equity} width={420} height={64} />
-          </div>
+      {(curves.full || curves.wf) && (
+        <section className="panel p-5 space-y-4">
+          <div className="hud">Performance — backtest (development period{curves.sealed ? " + sealed holdout" : ""})</div>
+          <LineChart series={[
+            ...(curves.full ? [{ name: "full backtest", color: "#5aa9e6", curve: curves.full }] : []),
+            ...(curves.sealed ? [{ name: "SEALED (never seen)", color: "#e8b34b", curve: curves.sealed }] : []),
+          ]} />
+          {curves.full && <DrawdownChart curve={curves.full} />}
+          {curves.wf && (
+            <>
+              <div className="hud pt-2">Walk-forward out-of-sample only (re-tuned monthly — the honest curve)</div>
+              <LineChart series={[{ name: "WF OOS", color: "#2dd4a7", curve: curves.wf }]} height={150} />
+            </>
+          )}
         </section>
       )}
+
+      {acct && (() => {
+        const rets = snaps ? [...snaps].reverse().map((s) => s.ret) : [];
+        const mean = rets.length ? rets.reduce((a, b) => a + b, 0) / rets.length : 0;
+        const sd = rets.length ? Math.sqrt(Math.max(0, rets.reduce((a, b) => a + b * b, 0) / rets.length - mean * mean)) : 0;
+        const liveSharpe = sd > 1e-12 ? (mean / sd) * Math.sqrt(8760) : 0;
+        let peak = -Infinity, liveDD = 0;
+        for (const e of equity) { peak = Math.max(peak, e); liveDD = Math.min(liveDD, e / peak - 1); }
+        return (
+          <section className="panel p-5 flex gap-10 items-end flex-wrap">
+            <Stat label="Paper equity" value={`$${acct.equity.toFixed(0)}`} tone={acct.equity >= 10000 ? "up" : "down"} />
+            <Stat label="Live Sharpe" value={rets.length > 48 ? fmtNum(liveSharpe) : "warming"} tone={liveSharpe > 0 ? "up" : undefined} />
+            <Stat label="Live max DD" value={fmtPct(liveDD, 1)} tone={liveDD < -0.05 ? "down" : undefined} />
+            <Stat label="Peak" value={`$${acct.peakEquity.toFixed(0)}`} />
+            <Stat label="Status" value={acct.halted ? `HALTED: ${acct.haltReason}` : "live"} tone={acct.halted ? "down" : "up"} />
+            <div>
+              <div className="hud mb-1">Live paper equity</div>
+              <Sparkline values={equity} width={420} height={64} />
+            </div>
+          </section>
+        );
+      })()}
 
       <section className="panel p-5">
         <div className="hud mb-3">Gauntlet report card</div>
