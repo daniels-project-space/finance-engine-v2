@@ -180,13 +180,83 @@ const OP_SWAPS: Record<string, string[]> = {
   add: ["sub"], sub: ["add"], min2: ["max2"], max2: ["min2"],
 };
 
-export function mutateStrategy(parent: StrategyDoc, seed: number): { doc: StrategyDoc; mutation: string } {
+/** Steer the operator distribution by the parent's cause of death. */
+export type MutationHint = "risk" | "consistency" | "generalize" | "sharpe" | undefined;
+
+export function mutateStrategy(parent: StrategyDoc, seed: number, hint?: MutationHint): { doc: StrategyDoc; mutation: string } {
   const rng = mulberry32(seed);
   for (let attempt = 0; attempt < 12; attempt++) {
     const doc = clone(parent);
     doc.name = `mut_${seed.toString(36)}`;
-    const kind = rng();
     let mutation = "";
+
+    // ---- directed repairs: parent died on a specific floor ----
+    if (hint === "risk" && rng() < 0.75) {
+      // died on drawdown / worst-month: tame the risk overlay without touching the signal
+      const r = doc.risk;
+      const choice = rng();
+      if (choice < 0.35) { r.stopAtrMult = Number((1.2 + rng() * 1.3).toFixed(1)); mutation = "repair_tighten_stop"; }
+      else if (choice < 0.65) { r.trailAtrMult = Number((1.8 + rng() * 1.7).toFixed(1)); mutation = "repair_add_trail"; }
+      else if (choice < 0.85) { r.volTargetAnnual = Number((0.15 + rng() * 0.08).toFixed(2)); mutation = "repair_lower_voltarget"; }
+      else {
+        const filter = genFilter(rng, doc.params);
+        doc.longEntry = { op: "and", a: filter, b: doc.longEntry };
+        if (doc.shortEntry) doc.shortEntry = { op: "and", a: invertBool(filter), b: doc.shortEntry };
+        mutation = "repair_regime_gate";
+      }
+      const all = doc.params;
+      doc.params = capParams(all);
+      const folded = foldMissingParams(doc, all);
+      folded.hypothesis = `${parent.hypothesis.slice(0, 140)} [repair: ${mutation}]`;
+      if (validateStrategy(folded).length === 0) return { doc: folded, mutation };
+      continue;
+    }
+    if (hint === "consistency" && rng() < 0.7) {
+      // died on positive-months: slow the signal or gate it to calm regimes
+      if (rng() < 0.5) {
+        const keys = Object.keys(doc.params).filter((k) => doc.params[k].int);
+        if (keys.length) {
+          const k2 = pick(rng, keys);
+          const ps = doc.params[k2];
+          ps.default = Math.round(Math.min(ps.max * 2, ps.default * (1.4 + rng() * 0.8)));
+          ps.max = Math.max(ps.max, ps.default);
+          mutation = `repair_slow:${k2}`;
+        }
+      }
+      if (!mutation) {
+        const volRank: Expr = { op: "pctrank", src: { op: "atr", src: { op: "price", field: "close" }, period: { op: "const", value: 14 } }, period: { op: "const", value: 150 } };
+        doc.longEntry = { op: "and", a: { op: "lt", a: volRank, b: freshParam(doc.params, 0.4, 0.9, 0.65, false) }, b: doc.longEntry };
+        mutation = "repair_calm_gate";
+      }
+      const all = doc.params;
+      doc.params = capParams(all);
+      const folded = foldMissingParams(doc, all);
+      folded.hypothesis = `${parent.hypothesis.slice(0, 140)} [repair: ${mutation}]`;
+      if (validateStrategy(folded).length === 0) return { doc: folded, mutation };
+      continue;
+    }
+    if (hint === "generalize" && rng() < 0.6) {
+      // died cross-symbol/portfolio: strip the most BTC-specific structure — simplify
+      const n = doc.longEntry as unknown as AnyNode;
+      if (n.op === "and") {
+        doc.longEntry = (rng() < 0.5 ? n.a : n.b) as Expr;
+        mutation = "repair_simplify_entry";
+      } else if (doc.params && Object.keys(doc.params).length > 2) {
+        // widen param ranges so per-symbol re-tuning has room
+        for (const ps of Object.values(doc.params)) { ps.min = ps.int ? Math.max(1, Math.round(ps.min * 0.6)) : ps.min * 0.6; ps.max = ps.int ? Math.round(ps.max * 1.5) : ps.max * 1.5; }
+        mutation = "repair_widen_ranges";
+      }
+      if (mutation) {
+        const all = doc.params;
+        doc.params = capParams(all);
+        const folded = foldMissingParams(doc, all);
+        folded.hypothesis = `${parent.hypothesis.slice(0, 140)} [repair: ${mutation}]`;
+        if (validateStrategy(folded).length === 0) return { doc: folded, mutation };
+        continue;
+      }
+    }
+
+    const kind = rng();
     try {
       if (kind < 0.2) {
         // op swap somewhere

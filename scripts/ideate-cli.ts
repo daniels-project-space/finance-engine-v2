@@ -53,9 +53,18 @@ async function main() {
       ? `"${champion.name}" composite=${champion.composite?.toFixed(2)}: ${champion.hypothesis}`
       : `none yet. Current tournament board (best first):\n${boardSummary}`;
 
+    const bestComposite = Math.max(0, ...board.map((b) => b.composite ?? 0));
+    const failureForensics = board.slice(0, 6).map((b) => {
+      const m = b.metrics ? JSON.parse(b.metrics) as Record<string, number> : {};
+      return `"${b.name}": btcWfSharpe=${(m.wfPooledSharpe ?? 0).toFixed(2)} fullSharpe=${(m.fullSharpe ?? 0).toFixed(2)} maxDD=${((m.fullMaxDD ?? 0) * 100).toFixed(0)}% — killed at ${b.failedStage}: ${b.failedReason}`;
+    }).join("\n");
+
     const prompt = `${buildPrompt(lessons, "", n, championSummary)}
 
-TARGET: deployed 5-pair portfolio OOS Sharpe >= 1.5 with CAGR >= 30%, surviving re-tuning walk-forward, cross-symbol generalization, DSR/permutation/bootstrap, stress, sealed holdout. Strategies are traded equal-weight across BTC/ETH/SOL/BNB/XRP perps — design rules that generalize ACROSS assets, not BTC-specific fits. The DSL has a "funding" operator ({"op":"funding"}) exposing the per-bar perp funding rate — carry/crowding mechanisms are encouraged.
+MISSION: the current best composite on the board is ${bestComposite.toFixed(2)}. Your strategies must aim to BEAT ${(bestComposite * 2).toFixed(2)} (double). Failure forensics of the current leaders — design around these exact causes of death:
+${failureForensics}
+
+TARGET: deployed 5-pair portfolio OOS Sharpe >= 1.5 with CAGR >= 30%, surviving re-tuning walk-forward, cross-symbol generalization, DSR/permutation/bootstrap, stress, sealed holdout. Strategies are traded equal-weight across BTC/ETH/SOL/BNB/XRP perps — design rules that generalize ACROSS assets, not BTC-specific fits. The DSL has a "funding" operator ({"op":"funding"}) exposing the per-bar perp funding rate — carry/crowding mechanisms are encouraged. Mind the floors that killed the leaders: OOS maxDD must stay above -30%, worst month above -15%, >=55% positive months at PORTFOLIO level. Use the risk overlay (stopAtrMult/trailAtrMult/volTargetAnnual) deliberately — drawdown control is what the near-misses lacked.
 
 Output ONLY the JSON object. No prose, no markdown fences.`;
 

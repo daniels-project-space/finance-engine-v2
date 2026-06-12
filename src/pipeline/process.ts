@@ -8,7 +8,7 @@ import { mergeConfig, todayKey, type AppConfig } from "../lib/appConfig";
 import { loadBars } from "../lib/data";
 import { artifactKey, putJsonGz } from "../lib/storage";
 import { canonicalHash, familyHash, validateStrategy } from "../engine/dsl";
-import { crossoverStrategies, mutateStrategy, randomStrategy } from "../engine/evolve";
+import { crossoverStrategies, mutateStrategy, randomStrategy, type MutationHint } from "../engine/evolve";
 import { SEED_LIBRARY } from "../engine/library";
 import { evaluateSealed, runGauntlet } from "../engine/gauntlet";
 import { propose } from "../engine/llm";
@@ -44,7 +44,28 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
       if (parentRows.length >= 10) break;
     }
   }
-  const parents = parentRows.map((c) => ({ doc: JSON.parse(c.dsl) as StrategyDoc, id: c._id as string }));
+  const hintFor = (reason?: string): MutationHint => {
+    if (!reason) return undefined;
+    if (/maxDD|worst month/i.test(reason)) return "risk";
+    if (/positive months/i.test(reason)) return "consistency";
+    if (/portfolio|symbols </i.test(reason)) return "generalize";
+    if (/sharpe/i.test(reason)) return "sharpe";
+    return undefined;
+  };
+  const parents = parentRows.map((c) => {
+    const doc = JSON.parse(c.dsl) as StrategyDoc;
+    // children start from the parent's PROVEN parameters, not cold defaults
+    if (c.bestParams) {
+      try {
+        const bp = JSON.parse(c.bestParams) as Record<string, number>;
+        for (const [k, v] of Object.entries(bp)) {
+          const spec = doc.params?.[k];
+          if (spec && Number.isFinite(v)) spec.default = Math.min(spec.max, Math.max(spec.min, spec.int ? Math.round(v) : v));
+        }
+      } catch { /* keep defaults */ }
+    }
+    return { doc, id: c._id as string, hint: hintFor(c.failedReason) };
+  });
 
   const seedBase = (await cx.mutation(api.pipeline.bumpCounter, { key: "seed", by: 1 })) * 7919;
   const proposals: { doc: StrategyDoc; source: string; parentIds?: string[] }[] = [];
@@ -66,8 +87,8 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
       proposals.push({ doc: crossoverStrategies(a.doc, b.doc, seed), source: "crossover", parentIds: [a.id, b.id] });
     } else {
       const p = parents[i % parents.length];
-      const { doc } = mutateStrategy(p.doc, seed);
-      proposals.push({ doc, source: "mutation", parentIds: [p.id] });
+      const { doc, mutation } = mutateStrategy(p.doc, seed, p.hint);
+      proposals.push({ doc, source: mutation.startsWith("repair_") ? "repair" : "mutation", parentIds: [p.id] });
     }
     summary.gp++;
   }

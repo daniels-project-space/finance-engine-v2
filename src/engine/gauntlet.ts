@@ -13,7 +13,7 @@
 import { indexOfTs, runBacktest } from "./backtest";
 import { bootstrapSharpeCI, dsr, permutationTest } from "./stats";
 import { runStress, type StressReport } from "./stress";
-import { tune } from "./tune";
+import { adaptiveTrials, tune } from "./tune";
 import { walkForward, type WfReport } from "./walkforward";
 import { validateStrategy } from "./dsl";
 import { DEFAULT_FEE_BPS, SLIP_BPS, PPY, type Bars, type GateFloors, type StrategyDoc } from "./types";
@@ -161,7 +161,7 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
   // ---- S2 train fit (first 70% of pre-seal data) --------------------------
   started = t0();
   const trainEndI = Math.floor(devEndI * 0.7);
-  const fit = tune(doc, primary, opts, { startI: 1, endI: trainEndI }, 60, 11);
+  const fit = tune(doc, primary, opts, { startI: 1, endI: trainEndI }, adaptiveTrials(doc, 50), 11);
   metrics.trainSharpe = fit.sharpe;
   const years = trainEndI / opts.ppy;
   const tradesPerYear = fit.trades / Math.max(0.1, years);
