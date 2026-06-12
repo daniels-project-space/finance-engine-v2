@@ -117,6 +117,17 @@ async function main() {
   const libRes = runBacktest(SEED_LIBRARY[0], bars, { fast: 16, slow: 64 }, opts);
   check("ewmac seed runs", Number.isFinite(libRes.metrics.sharpe) && libRes.metrics.trades > 5, `trades=${libRes.metrics.trades}`);
 
+  console.log("— NaN-aware composition (indicator-of-indicator) —");
+  const S = await import("../src/engine/series");
+  const withNaN = new Float64Array(500);
+  for (let i = 0; i < 500; i++) withNaN[i] = i < 30 ? NaN : Math.sin(i / 9) * 5 + i * 0.01;
+  const composed = S.zscore(S.ema(withNaN, 10), 50);
+  let finiteCount = 0, mn2 = Infinity, mx2 = -Infinity;
+  for (const v of composed) if (!Number.isNaN(v)) { finiteCount++; mn2 = Math.min(mn2, v); mx2 = Math.max(mx2, v); }
+  check("zscore(ema(NaN-prefixed)) produces values", finiteCount > 350, `${finiteCount} finite`);
+  check("composed zscore has real range", mx2 > 1 && mn2 < -1, `[${mn2.toFixed(1)}, ${mx2.toFixed(1)}]`);
+  check("warmup still NaN", Number.isNaN(composed[35]));
+
   console.log("— funding op + portfolio merge —");
   const { mergePortfolio, seriesStats } = await import("../src/engine/gauntlet");
   const fundingStrategy: StrategyDoc = {

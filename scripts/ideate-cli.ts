@@ -61,10 +61,30 @@ Output ONLY the JSON object. No prose, no markdown fences.`;
 
     console.log(`asking ${MODEL} for ${n} proposals (${lessons.length} lessons in context)...`);
     const t0 = Date.now();
-    const raw = await runClaude(prompt);
+    const raw = process.env.FABLE_RAW
+      ? (await import("node:fs")).readFileSync(process.env.FABLE_RAW, "utf-8")
+      : await runClaude(prompt);
     console.log(`fable replied in ${((Date.now() - t0) / 1000).toFixed(0)}s (${raw.length} chars)`);
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync("/tmp/fable-raw.txt", raw);
     const proposals = parseProposals(raw);
     console.log(`${proposals.length}/${n} proposals passed DSL validation`);
+    if (proposals.length === 0) {
+      // diagnose: was it a parse failure or validation kills?
+      try {
+        const cleaned = raw.replace(/```json\s*/g, "").replace(/```/g, "");
+        const m = cleaned.match(/\{[\s\S]*\}/);
+        const parsed = JSON.parse(m ? m[0] : cleaned) as { proposals?: { strategy?: unknown }[] };
+        console.log(`parse OK, ${parsed.proposals?.length ?? 0} raw proposals; validation errors:`);
+        for (const item of parsed.proposals ?? []) {
+          const doc = item.strategy as Parameters<typeof validateStrategy>[0];
+          if (doc) console.log(`  - ${(doc as { name?: string }).name}: ${validateStrategy(doc).join("; ") || "valid?"}`);
+        }
+      } catch (e) {
+        console.log(`JSON parse failed: ${e instanceof Error ? e.message.slice(0, 120) : e}`);
+        console.log(`raw head: ${raw.slice(0, 400)}`);
+      }
+    }
 
     let queued = 0, passed = 0;
     for (const p of proposals) {

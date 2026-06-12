@@ -86,13 +86,16 @@ export function parseProposals(raw: string): LlmProposal[] {
     if (!m) return [];
     try { parsed = JSON.parse(m[0]); } catch { return []; }
   }
-  const arr = (parsed as { proposals?: unknown[] })?.proposals;
+  // accept several reasonable envelopes: {proposals:[{rationale,strategy}]},
+  // {strategies:[StrategyDoc]}, or a bare top-level array of either shape
+  const env = parsed as { proposals?: unknown[]; strategies?: unknown[] };
+  const arr = env?.proposals ?? env?.strategies ?? (Array.isArray(parsed) ? parsed : undefined);
   if (!Array.isArray(arr)) return [];
   const out: LlmProposal[] = [];
   for (const item of arr) {
-    const it = item as { rationale?: string; strategy?: StrategyDoc };
-    if (!it?.strategy) continue;
-    const doc = it.strategy;
+    const it = item as { rationale?: string; strategy?: StrategyDoc } & Partial<StrategyDoc>;
+    const doc = (it?.strategy ?? (it?.longEntry ? (it as unknown as StrategyDoc) : undefined)) as StrategyDoc | undefined;
+    if (!doc) continue;
     doc.risk = doc.risk ?? { volTargetAnnual: 0.25, maxLeverage: 2 };
     doc.risk.volTargetAnnual = doc.risk.volTargetAnnual || 0.25;
     doc.risk.maxLeverage = Math.min(doc.risk.maxLeverage || 2, 2);
