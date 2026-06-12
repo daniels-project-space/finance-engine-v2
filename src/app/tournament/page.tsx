@@ -111,7 +111,7 @@ export default function TournamentPage() {
       <section className="panel p-5">
         <div className="hud mb-3">League — alive (gauntlet + sealed holdout passed)</div>
         {league.length ? (
-          <table className="w-full text-sm">
+          <div className="tablewrap"><table className="w-full text-sm">
             <thead><tr className="hud text-left">
               <th className="pb-2">#</th><th>strategy</th><th>gauntlet trail</th><th className="px-2">WF OOS equity</th>
               <th className="text-right">comp</th><th className="text-right">PORT</th><th className="text-right">BTC wf</th><th className="text-right">sealed</th>
@@ -119,7 +119,7 @@ export default function TournamentPage() {
               <th className="text-right">trades</th><th className="text-right">DSR</th>
             </tr></thead>
             <tbody>{league.map((r, i) => <Row key={r.id} r={r} rank={i + 1} />)}</tbody>
-          </table>
+          </table></div>
         ) : (
           <div className="text-dim text-sm py-3">
             Nobody alive yet. The league seat is earned, not seeded — candidates below show how close the field is getting.
@@ -130,7 +130,7 @@ export default function TournamentPage() {
       <section className="panel p-5">
         <div className="hud mb-3">Qualifiers — best of the fallen (ranked by partial composite at time of death)</div>
         {qualifiers.length ? (
-          <table className="w-full text-sm">
+          <div className="tablewrap"><table className="w-full text-sm">
             <thead><tr className="hud text-left">
               <th className="pb-2">#</th><th>strategy</th><th>gauntlet trail</th><th className="px-2">WF OOS equity</th>
               <th className="text-right">comp</th><th className="text-right">PORT</th><th className="text-right">BTC wf</th><th className="text-right">sealed</th>
@@ -138,7 +138,7 @@ export default function TournamentPage() {
               <th className="text-right">trades</th><th className="text-right">DSR</th>
             </tr></thead>
             <tbody>{qualifiers.slice(0, 40).map((r, i) => <Row key={r.id} r={r} rank={i + 1} />)}</tbody>
-          </table>
+          </table></div>
         ) : <div className="text-dim text-sm py-3">No scored candidates yet — run a cycle.</div>}
       </section>
     </div>
