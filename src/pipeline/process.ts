@@ -9,6 +9,7 @@ import { loadBars } from "../lib/data";
 import { artifactKey, putJsonGz } from "../lib/storage";
 import { canonicalHash, familyHash, validateStrategy } from "../engine/dsl";
 import { crossoverStrategies, mutateStrategy, randomStrategy } from "../engine/evolve";
+import { SEED_LIBRARY } from "../engine/library";
 import { evaluateSealed, runGauntlet } from "../engine/gauntlet";
 import { propose } from "../engine/llm";
 import type { Bars, StrategyDoc } from "../engine/types";
@@ -47,6 +48,15 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
 
   const seedBase = (await cx.mutation(api.pipeline.bumpCounter, { key: "seed", by: 1 })) * 7919;
   const proposals: { doc: StrategyDoc; source: string; parentIds?: string[] }[] = [];
+
+  // Library backfill: any research-backed seed not yet registered goes first.
+  // The founders anchor the ranking; evolution refines from there.
+  for (const seedDoc of SEED_LIBRARY) {
+    const hash = canonicalHash(seedDoc);
+    if (!(await cx.query(api.candidates.hashExists, { hash }))) {
+      proposals.push({ doc: seedDoc, source: "seed" });
+    }
+  }
 
   const gpN = Math.round(cfg.evo.batchGp * scale);
   for (let i = 0; i < gpN && parents.length > 0; i++) {

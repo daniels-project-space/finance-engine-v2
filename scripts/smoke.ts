@@ -101,6 +101,22 @@ async function main() {
   const fRes = runBacktest(emaCross, fBars, { fast: 20, slow: 100 }, opts);
   check("positive funding penalizes longs", fRes.equity[fRes.equity.length - 1] < res.equity[res.equity.length - 1]);
 
+  console.log("— seed library —");
+  const { SEED_LIBRARY } = await import("../src/engine/library");
+  const { canonicalHash: ch, familyHash: fh } = await import("../src/engine/dsl");
+  let libValid = 0;
+  const fams = new Set<string>();
+  for (const s of SEED_LIBRARY) {
+    const errs = validateStrategy(s);
+    if (errs.length === 0) libValid++;
+    else console.error(`    ${s.name}: ${errs.join("; ")}`);
+    fams.add(fh(s));
+  }
+  check(`all ${SEED_LIBRARY.length} library seeds valid`, libValid === SEED_LIBRARY.length);
+  check("library families structurally distinct", fams.size === SEED_LIBRARY.length, `${fams.size}/${SEED_LIBRARY.length}`);
+  const libRes = runBacktest(SEED_LIBRARY[0], bars, { fast: 16, slow: 64 }, opts);
+  check("ewmac seed runs", Number.isFinite(libRes.metrics.sharpe) && libRes.metrics.trades > 5, `trades=${libRes.metrics.trades}`);
+
   console.log("— GP generation —");
   let valid = 0;
   for (let s = 0; s < 50; s++) if (validateStrategy(randomStrategy(s)).length === 0) valid++;

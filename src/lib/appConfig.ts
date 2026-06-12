@@ -26,7 +26,9 @@ export const DEFAULT_CONFIG: AppConfig = {
   autoPromote: true,
   paperStartEquity: 10_000,
   killSwitch: { dailyDD: -0.05, weeklyDD: -0.10, monthlyDD: -0.20 },
-  evo: { batchGp: 14, batchFresh: 6, batchLlm: 4, maxCandidatesPerDay: 150 },
+  // GP-dominant refinement of the scored board; random grammar samples are a
+  // trickle for diversity only — the library seeds are the real fresh blood.
+  evo: { batchGp: 18, batchFresh: 2, batchLlm: 4, maxCandidatesPerDay: 150 },
   llmDailyBudgetUsd: 1.0,
 };
 

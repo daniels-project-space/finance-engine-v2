@@ -141,11 +141,27 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
     const ts = Array.from({ length: eq.length }, (_, i) => t0w + ((t1w - t0w) * i) / Math.max(1, eq.length - 1));
     curves.wf = downsampleCurve(ts, eq, 0, eq.length - 1, 240);
   }
-  if (wf.windows.length < 12) return fail("S3-walkforward", `only ${wf.windows.length} WF windows`, started, summarizeWf(wf));
-  if (wf.pooledSharpe < floors.wfMinMeanSharpe) return fail("S3-walkforward", `OOS pooled sharpe ${wf.pooledSharpe.toFixed(2)} < ${floors.wfMinMeanSharpe}`, started, summarizeWf(wf));
-  if (wf.pctPositive < floors.wfMinPctPositive) return fail("S3-walkforward", `${(wf.pctPositive * 100).toFixed(0)}% positive months < ${floors.wfMinPctPositive * 100}%`, started, summarizeWf(wf));
-  if (wf.worstWindowRet < floors.wfWorstMonth) return fail("S3-walkforward", `worst month ${(wf.worstWindowRet * 100).toFixed(1)}% < ${floors.wfWorstMonth * 100}%`, started, summarizeWf(wf));
-  if (wf.pooledMaxDD < floors.wfMaxDD) return fail("S3-walkforward", `OOS maxDD ${(wf.pooledMaxDD * 100).toFixed(0)}%`, started, summarizeWf(wf));
+  const s3Fail =
+    wf.windows.length < 12 ? `only ${wf.windows.length} WF windows`
+    : wf.pooledSharpe < floors.wfMinMeanSharpe ? `OOS pooled sharpe ${wf.pooledSharpe.toFixed(2)} < ${floors.wfMinMeanSharpe}`
+    : wf.pctPositive < floors.wfMinPctPositive ? `${(wf.pctPositive * 100).toFixed(0)}% positive months < ${floors.wfMinPctPositive * 100}%`
+    : wf.worstWindowRet < floors.wfWorstMonth ? `worst month ${(wf.worstWindowRet * 100).toFixed(1)}% < ${floors.wfWorstMonth * 100}%`
+    : wf.pooledMaxDD < floors.wfMaxDD ? `OOS maxDD ${(wf.pooledMaxDD * 100).toFixed(0)}%`
+    : null;
+  if (s3Fail) {
+    // backfill full-period stats + curve so the tournament ranks the fallen on real numbers
+    const fb = wf.windows.length >= 4 ? medianParams(doc, wf) : fit.params;
+    const fullQ = runBacktest(doc, primary, fb, opts, { startI: 1, endI: devEndI });
+    metrics.fullSharpe = fullQ.metrics.sharpe;
+    metrics.fullSortino = fullQ.metrics.sortino;
+    metrics.fullMaxDD = fullQ.metrics.maxDD;
+    metrics.fullCagr = fullQ.metrics.cagr;
+    metrics.winRate = fullQ.metrics.winRate;
+    metrics.fullTrades = fullQ.metrics.trades;
+    metrics.exposure = fullQ.metrics.exposure;
+    curves.full = downsampleCurve(primary.t, fullQ.equity, 1, devEndI, 300);
+    return fail("S3-walkforward", s3Fail, started, summarizeWf(wf));
+  }
   stages.push({ stage: "S3-walkforward", passed: true, durationMs: Date.now() - started, detail: summarizeWf(wf) });
   g.log?.(`S3 pass oosSharpe=${wf.pooledSharpe.toFixed(2)} pos=${(wf.pctPositive * 100).toFixed(0)}%`);
 
