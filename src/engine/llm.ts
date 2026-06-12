@@ -63,7 +63,7 @@ const PROPOSAL_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-function buildPrompt(lessons: string[], marketNotes: string, nProposals: number, championSummary: string): string {
+export function buildPrompt(lessons: string[], marketNotes: string, nProposals: number, championSummary: string): string {
   return `${DSL_GUIDE}
 
 ## Current champion
@@ -78,10 +78,11 @@ ${marketNotes || "(none)"}
 Propose ${nProposals} DIVERSE strategies (different mechanism families — don't submit ${nProposals} variations of one idea). Each must include a falsifiable hypothesis naming the structural reason the edge exists (who is on the other side / what friction creates it).`;
 }
 
-function parseProposals(raw: string): LlmProposal[] {
+export function parseProposals(raw: string): LlmProposal[] {
   let parsed: unknown;
-  try { parsed = JSON.parse(raw); } catch {
-    const m = raw.match(/\{[\s\S]*\}/);
+  const cleaned = raw.replace(/```json\s*/g, "").replace(/```/g, "");
+  try { parsed = JSON.parse(cleaned); } catch {
+    const m = cleaned.match(/\{[\s\S]*\}/);
     if (!m) return [];
     try { parsed = JSON.parse(m[0]); } catch { return []; }
   }
