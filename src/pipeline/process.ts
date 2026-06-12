@@ -30,8 +30,20 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
 
   const champion = await cx.query(api.candidates.champion, {});
   const leaders = await cx.query(api.candidates.leaderboard, { limit: 12 });
-  const parents = [...(champion ? [champion] : []), ...leaders.filter((l) => l._id !== champion?._id)]
-    .map((c) => ({ doc: JSON.parse(c.dsl) as StrategyDoc, id: c._id as string }));
+  const parentRows = [...(champion ? [champion] : []), ...leaders.filter((l) => l._id !== champion?._id)];
+  // Until strategies survive, breed from the best of the fallen — near-misses
+  // that reached walk-forward with a positive partial composite are the gene pool.
+  if (parentRows.length < 6) {
+    const board = await cx.query(api.candidates.tournament, { limit: 30 });
+    const have = new Set(parentRows.map((p) => p._id));
+    for (const row of board) {
+      if (have.has(row._id) || (row.composite ?? 0) <= 0.05) continue;
+      parentRows.push(row);
+      have.add(row._id);
+      if (parentRows.length >= 10) break;
+    }
+  }
+  const parents = parentRows.map((c) => ({ doc: JSON.parse(c.dsl) as StrategyDoc, id: c._id as string }));
 
   const seedBase = (await cx.mutation(api.pipeline.bumpCounter, { key: "seed", by: 1 })) * 7919;
   const proposals: { doc: StrategyDoc; source: string; parentIds?: string[] }[] = [];
