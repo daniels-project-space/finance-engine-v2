@@ -1,4 +1,4 @@
-import { logger, task } from "@trigger.dev/sdk/v3";
+import { logger, queue, task } from "@trigger.dev/sdk";
 import { api, convex } from "../lib/convexClient";
 import { mergeConfig, todayKey } from "../lib/appConfig";
 import { loadBars } from "../lib/data";
@@ -7,11 +7,13 @@ import { evaluateSealed, runGauntlet } from "../engine/gauntlet";
 import type { Bars, StrategyDoc } from "../engine/types";
 import type { Id } from "../../convex/_generated/dataModel";
 
+const gauntletQueue = queue({ name: "gauntlet", concurrencyLimit: 4 });
+
 export const gauntletTask = task({
   id: "run-gauntlet",
-  machine: { preset: "small-2x" },
+  machine: "small-2x",
   maxDuration: 1700,
-  queue: { concurrencyLimit: 4 },
+  queue: gauntletQueue,
   run: async (payload: { candidateId: string }) => {
     const cx = convex();
     const candidateId = payload.candidateId as Id<"candidates">;

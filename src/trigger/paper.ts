@@ -3,7 +3,7 @@
 // the fill function swaps for a real exchange connector (testnet, then live)
 // without touching the accounting.
 
-import { logger, schedules } from "@trigger.dev/sdk/v3";
+import { logger, schedules } from "@trigger.dev/sdk";
 import { api, convex } from "../lib/convexClient";
 import { mergeConfig } from "../lib/appConfig";
 import { loadBars } from "../lib/data";
@@ -50,7 +50,7 @@ function targetWeight(doc: StrategyDoc, params: Record<string, number>, bars: Ba
 export const paperStep = schedules.task({
   id: "paper-step",
   cron: "12 * * * *",
-  machine: { preset: "small-2x" },
+  machine: "small-2x",
   maxDuration: 1500,
   run: async () => {
     const cx = convex();

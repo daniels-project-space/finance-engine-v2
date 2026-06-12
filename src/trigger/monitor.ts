@@ -1,7 +1,7 @@
 // Daily monitor: graduate incubated strategies, auto-promote validated ones,
 // demote degrading champions. The "never replaces until validated" protocol.
 
-import { logger, schedules } from "@trigger.dev/sdk/v3";
+import { logger, schedules } from "@trigger.dev/sdk";
 import { api, convex } from "../lib/convexClient";
 import { mergeConfig } from "../lib/appConfig";
 import { sendTelegram } from "../lib/telegram";
@@ -18,7 +18,7 @@ function liveSharpe(snaps: { ret: number }[], periodsPerYear = 8760): number {
 export const dailyMonitor = schedules.task({
   id: "daily-monitor",
   cron: "0 7 * * *",
-  machine: { preset: "small-1x" },
+  machine: "small-1x",
   maxDuration: 900,
   run: async () => {
     const cx = convex();

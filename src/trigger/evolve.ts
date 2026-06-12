@@ -1,4 +1,4 @@
-import { logger, schedules } from "@trigger.dev/sdk/v3";
+import { logger, schedules } from "@trigger.dev/sdk";
 import { api, convex } from "../lib/convexClient";
 import { mergeConfig, todayKey } from "../lib/appConfig";
 import { canonicalHash, familyHash, validateStrategy } from "../engine/dsl";
@@ -10,7 +10,7 @@ import { gauntletTask } from "./gauntlet";
 export const evolveCycle = schedules.task({
   id: "evolve-cycle",
   cron: "20 */6 * * *",
-  machine: { preset: "small-2x" },
+  machine: "small-2x",
   maxDuration: 1500,
   run: async () => {
     const cx = convex();

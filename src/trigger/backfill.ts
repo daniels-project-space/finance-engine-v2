@@ -1,5 +1,5 @@
 // One-shot historical backfill (manual trigger from the Trigger dashboard or CLI).
-import { logger, task } from "@trigger.dev/sdk/v3";
+import { logger, task } from "@trigger.dev/sdk";
 import { api, convex } from "../lib/convexClient";
 import { mergeConfig } from "../lib/appConfig";
 import { aggregateBars, ingestSymbol, loadBars } from "../lib/data";
@@ -7,7 +7,7 @@ import { candleKey, putJsonGz } from "../lib/storage";
 
 export const backfillHistory = task({
   id: "backfill-history",
-  machine: { preset: "small-2x" },
+  machine: "small-2x",
   maxDuration: 3000,
   run: async (payload: { symbols?: string[] } = {}) => {
     const cx = convex();

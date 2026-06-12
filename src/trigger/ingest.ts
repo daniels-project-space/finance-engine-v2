@@ -1,4 +1,4 @@
-import { logger, schedules } from "@trigger.dev/sdk/v3";
+import { logger, schedules } from "@trigger.dev/sdk";
 import { api, convex } from "../lib/convexClient";
 import { mergeConfig } from "../lib/appConfig";
 import { aggregateBars, ingestSymbol, loadBars } from "../lib/data";
@@ -7,7 +7,7 @@ import { candleKey, putJsonGz } from "../lib/storage";
 export const ingestCandles = schedules.task({
   id: "ingest-candles",
   cron: "2 * * * *", // hourly, just after bar close
-  machine: { preset: "small-2x" },
+  machine: "small-2x",
   maxDuration: 1500,
   run: async () => {
     const cx = convex();
