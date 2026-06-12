@@ -37,9 +37,11 @@ Expr grammar (recursive):
 
 Strategy object:
  {"name":str,"hypothesis":str (WHY it should work, mechanism not vibes),
+  "tf?":"1h"|"4h"|"1d",  // bar timeframe (default 1h); slower tf = scaled trade-count floors
   "longEntry":BoolExpr,"longExit":BoolExpr,"shortEntry?":BoolExpr,"shortExit?":BoolExpr,
   "params":{name:{min,max,default,int?}}, // <=6 params
-  "risk":{"stopAtrMult?":num,"trailAtrMult?":num,"volTargetAnnual":0.25,"maxLeverage":2}}
+  "risk":{"stopAtrMult?":num,"trailAtrMult?":num,"volTargetAnnual":0.1-0.6,"maxLeverage":1-4}}
+Leverage appetite (volTargetAnnual + maxLeverage) is judged by the same drawdown floors — an account bust in backtest is terminal, so size deliberately.
 
 Constraints: <=48 nodes per expression, depth <=10, periods 1..500. Strategies trade 1h bars on BTC/ETH/SOL/BNB/XRP USDT perps, costs ~7bps/side + funding. They must survive: re-tuning walk-forward (OOS Sharpe>0.5, 55% positive months), cross-symbol generalization (3/5 pairs), DSR>0.95 deflated for all trials ever, permutation test p<0.05, 3x slippage, crisis replays, then a sealed holdout and 30 days of live paper. Design for robustness, not in-sample fit: prefer structural/regime-aware mechanisms, few params, slow signals over fast noise. Aim 30-300 trades/yr.`;
 
@@ -97,8 +99,9 @@ export function parseProposals(raw: string): LlmProposal[] {
     const doc = (it?.strategy ?? (it?.longEntry ? (it as unknown as StrategyDoc) : undefined)) as StrategyDoc | undefined;
     if (!doc) continue;
     doc.risk = doc.risk ?? { volTargetAnnual: 0.25, maxLeverage: 2 };
-    doc.risk.volTargetAnnual = doc.risk.volTargetAnnual || 0.25;
-    doc.risk.maxLeverage = Math.min(doc.risk.maxLeverage || 2, 2);
+    doc.risk.volTargetAnnual = Math.min(Math.max(doc.risk.volTargetAnnual || 0.25, 0.1), 0.6);
+    doc.risk.maxLeverage = Math.min(doc.risk.maxLeverage || 2, 4);
+    if (doc.tf !== undefined && !["1h", "4h", "1d"].includes(doc.tf)) delete (doc as { tf?: string }).tf;
     doc.params = doc.params ?? {};
     if (validateStrategy(doc).length === 0) out.push({ doc, rationale: it.rationale ?? "" });
   }

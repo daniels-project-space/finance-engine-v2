@@ -8,17 +8,23 @@ import { StageBadge, fmtNum, fmtPct } from "../components/ui";
 
 interface Parsed {
   id: string; name: string; stage: string; source: string; composite: number;
-  failedStage?: string;
+  failedStage?: string; tf: string; lev: string;
   m: Record<string, number>;
   wfCurve?: Curve;
 }
 
-function parseRow(c: { _id: string; name: string; stage: string; source: string; composite?: number; failedStage?: string; metrics?: string; curves?: string }): Parsed {
+function parseRow(c: { _id: string; name: string; stage: string; source: string; composite?: number; failedStage?: string; metrics?: string; curves?: string; dsl?: string }): Parsed {
   let m: Record<string, number> = {};
   let wfCurve: Curve | undefined;
+  let tf = "1h", lev = "";
   try { m = c.metrics ? JSON.parse(c.metrics) : {}; } catch {}
   try { wfCurve = c.curves ? (JSON.parse(c.curves) as { wf?: Curve }).wf : undefined; } catch {}
-  return { id: c._id, name: c.name, stage: c.stage, source: c.source, composite: c.composite ?? 0, failedStage: c.failedStage, m, wfCurve };
+  try {
+    const d = c.dsl ? JSON.parse(c.dsl) as { tf?: string; risk?: { volTargetAnnual?: number; maxLeverage?: number } } : {};
+    tf = d.tf ?? "1h";
+    if (d.risk?.volTargetAnnual) lev = `σ${(d.risk.volTargetAnnual * 100).toFixed(0)}·L${d.risk.maxLeverage ?? 2}`;
+  } catch {}
+  return { id: c._id, name: c.name, stage: c.stage, source: c.source, composite: c.composite ?? 0, failedStage: c.failedStage, tf, lev, m, wfCurve };
 }
 
 const ACTIVE_STAGES = new Set(["champion", "eligible", "incubating", "sealed_passed"]);
@@ -29,7 +35,7 @@ function Row({ r, rank }: { r: Parsed; rank: number }) {
       <td className="num text-dim py-2 pr-2">{rank}</td>
       <td className="pr-3">
         <Link href={`/candidates/${r.id}`} className="hover:text-up">{r.name}</Link>
-        <div className="num text-[10px] text-dim">{r.source}{r.failedStage ? ` · out at ${r.failedStage}` : ""}</div>
+        <div className="num text-[10px] text-dim">{r.source} · {r.tf}{r.lev ? ` · ${r.lev}` : ""}{r.failedStage ? ` · out at ${r.failedStage}` : ""}</div>
       </td>
       <td><StageBadge stage={r.stage} /></td>
       <td className="px-2"><MiniCurve curve={r.wfCurve} /></td>

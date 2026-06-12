@@ -16,7 +16,7 @@ import { runStress, type StressReport } from "./stress";
 import { adaptiveTrials, tune } from "./tune";
 import { walkForward, type WfReport } from "./walkforward";
 import { validateStrategy } from "./dsl";
-import { DEFAULT_FEE_BPS, SLIP_BPS, PPY, type Bars, type GateFloors, type StrategyDoc } from "./types";
+import { DEFAULT_FEE_BPS, SLIP_BPS, PPY, tfScale, type Bars, type GateFloors, type StrategyDoc } from "./types";
 
 export interface StageOutcome {
   stage: string;
@@ -148,9 +148,10 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
 
   const { doc, primary, floors } = g;
   const opts = optsFor(primary.symbol, primary.tf);
+  const scaleT = tfScale(primary.tf);
   const sealI = indexOfTs(primary.t, g.sealTs); // first sealed index
   const devEndI = sealI - 1;
-  if (devEndI < 5000) throw new Error("not enough pre-seal data");
+  if (devEndI < Math.floor(opts.ppy * 0.6)) throw new Error("not enough pre-seal data");
 
   // ---- S0 static ----------------------------------------------------------
   let started = t0();
@@ -165,8 +166,9 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
   metrics.trainSharpe = fit.sharpe;
   const years = trainEndI / opts.ppy;
   const tradesPerYear = fit.trades / Math.max(0.1, years);
+  const minTradesYr = Math.ceil(floors.trainMinTradesPerYear * scaleT);
   if (fit.sharpe < floors.trainMinSharpe) return fail("S2-train", `train sharpe ${fit.sharpe.toFixed(2)} < ${floors.trainMinSharpe}`, started, fit);
-  if (tradesPerYear < floors.trainMinTradesPerYear) return fail("S2-train", `${tradesPerYear.toFixed(0)} trades/yr < ${floors.trainMinTradesPerYear}`, started, fit);
+  if (tradesPerYear < minTradesYr) return fail("S2-train", `${tradesPerYear.toFixed(0)} trades/yr < ${minTradesYr} (tf ${primary.tf})`, started, fit);
   const trainRes = runBacktest(doc, primary, fit.params, opts, { startI: 1, endI: trainEndI });
   if (trainRes.metrics.maxDD < floors.trainMaxDD) return fail("S2-train", `train maxDD ${(trainRes.metrics.maxDD * 100).toFixed(0)}% worse than ${floors.trainMaxDD * 100}%`, started, fit);
   stages.push({ stage: "S2-train", passed: true, durationMs: Date.now() - started, detail: { sharpe: fit.sharpe, tradesPerYear } });
@@ -305,7 +307,8 @@ export function evaluateSealed(
   const ps = seriesStats(port.ret, port.t, ppy);
   const curve = downsampleCurve(port.t, ps.equity, 0, port.t.length - 1, 150);
   const base = { sharpe: ps.sharpe, ret: ps.totalRet, maxDD: ps.maxDD, cagr: ps.cagr, trades, curve };
-  if (trades < floors.sealedMinTrades) return { passed: false, reason: `${trades} sealed trades < ${floors.sealedMinTrades}`, ...base };
+  const minTrades = Math.max(3, Math.ceil(floors.sealedMinTrades * tfScale(universeBars[0].tf)));
+  if (trades < minTrades) return { passed: false, reason: `${trades} sealed trades < ${minTrades}`, ...base };
   if (ps.sharpe < floors.sealedMinSharpe) return { passed: false, reason: `sealed portfolio sharpe ${ps.sharpe.toFixed(2)} < ${floors.sealedMinSharpe}`, ...base };
   if (ps.totalRet <= 0) return { passed: false, reason: `sealed return ${(ps.totalRet * 100).toFixed(1)}% <= 0`, ...base };
   if (ps.maxDD < floors.sealedMaxDD) return { passed: false, reason: `sealed maxDD ${(ps.maxDD * 100).toFixed(0)}%`, ...base };

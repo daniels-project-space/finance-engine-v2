@@ -141,9 +141,11 @@ export function randomStrategy(seed: number): StrategyDoc {
   const entry: Expr = rng() < 0.6 ? { op: "and", a: genFilter(rng, params), b: trigger } : trigger;
   const exit = genExit(rng, params, entry);
   const useShort = rng() < 0.35;
+  const tfRoll = rng();
   const doc: StrategyDoc = {
     name: `gp_${seed.toString(36)}`,
     hypothesis: "GP-sampled: composition of trend/momentum/vol primitives; survives only if the gauntlet proves temporal structure.",
+    tf: tfRoll < 0.5 ? "1h" : tfRoll < 0.85 ? "4h" : "1d",
     longEntry: entry,
     longExit: exit,
     shortEntry: useShort ? invertBool(entry) : undefined,
@@ -152,8 +154,8 @@ export function randomStrategy(seed: number): StrategyDoc {
     risk: {
       stopAtrMult: rng() < 0.7 ? Number((1.5 + rng() * 2.5).toFixed(1)) : undefined,
       trailAtrMult: rng() < 0.4 ? Number((2 + rng() * 3).toFixed(1)) : undefined,
-      volTargetAnnual: 0.25,
-      maxLeverage: 2,
+      volTargetAnnual: Number((0.15 + rng() * 0.45).toFixed(2)), // leverage appetite is part of the genome
+      maxLeverage: Number((1 + rng() * 3).toFixed(1)),
     },
   };
   return foldMissingParams(doc, params);
@@ -301,10 +303,22 @@ export function mutateStrategy(parent: StrategyDoc, seed: number, hint?: Mutatio
         if (doc.shortEntry) { doc.shortEntry = undefined; doc.shortExit = undefined; mutation = "drop_shorts"; }
         else { doc.shortEntry = invertBool(doc.longEntry); doc.shortExit = invertBool(doc.longExit); mutation = "add_shorts"; }
       } else {
-        // risk overlay tweak
+        // risk/leverage/timeframe overlay tweak
         const r = doc.risk;
-        if (rng() < 0.5) { r.stopAtrMult = r.stopAtrMult ? undefined : Number((1.5 + rng() * 2.5).toFixed(1)); mutation = "toggle_stop"; }
-        else { r.trailAtrMult = r.trailAtrMult ? undefined : Number((2 + rng() * 3).toFixed(1)); mutation = "toggle_trail"; }
+        const roll = rng();
+        if (roll < 0.3) { r.stopAtrMult = r.stopAtrMult ? undefined : Number((1.5 + rng() * 2.5).toFixed(1)); mutation = "toggle_stop"; }
+        else if (roll < 0.55) { r.trailAtrMult = r.trailAtrMult ? undefined : Number((2 + rng() * 3).toFixed(1)); mutation = "toggle_trail"; }
+        else if (roll < 0.8) {
+          const f = 0.7 + rng() * 0.9;
+          r.volTargetAnnual = Number(Math.min(0.6, Math.max(0.1, r.volTargetAnnual * f)).toFixed(2));
+          r.maxLeverage = Number(Math.min(4, Math.max(1, r.maxLeverage * f)).toFixed(1));
+          mutation = `leverage_x${f.toFixed(2)}`;
+        } else {
+          const tfs: ("1h" | "4h" | "1d")[] = ["1h", "4h", "1d"];
+          const cur = doc.tf ?? "1h";
+          doc.tf = pick(rng, tfs.filter((t) => t !== cur));
+          mutation = `tf_shift:${cur}->${doc.tf}`;
+        }
       }
       const all = doc.params;
       doc.params = capParams(all);

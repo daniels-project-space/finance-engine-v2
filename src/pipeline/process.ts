@@ -12,7 +12,7 @@ import { crossoverStrategies, mutateStrategy, randomStrategy, type MutationHint 
 import { SEED_LIBRARY } from "../engine/library";
 import { evaluateSealed, runGauntlet } from "../engine/gauntlet";
 import { propose } from "../engine/llm";
-import type { Bars, StrategyDoc } from "../engine/types";
+import { PPY, type Bars, type StrategyDoc } from "../engine/types";
 
 export type Log = (m: string) => void;
 
@@ -162,16 +162,21 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
     return { passed: false, stage: "S1-penalty" };
   }
 
-  const primary = await loadBars(cfg.primarySymbol, cfg.tf);
-  if (!primary || primary.t.length < 20_000) throw new Error("primary bars missing/short — run ingest first");
+  // per-strategy timeframe: data + thresholds follow the candidate's tf
+  const tf = doc.tf ?? (cfg.tf as "1h");
+  const ppy = PPY[tf] ?? 8760;
+  const primary = await loadBars(cfg.primarySymbol, tf);
+  if (!primary || primary.t.length < ppy * 2.2) throw new Error(`primary ${tf} bars missing/short — run ingest first`);
   const others: Bars[] = [];
   for (const sym of cfg.universe) {
     if (sym === cfg.primarySymbol) continue;
-    const b = await loadBars(sym, cfg.tf);
-    if (b && b.t.length > 15_000) others.push(b);
+    const b = await loadBars(sym, tf);
+    if (b && b.t.length > ppy * 1.7) others.push(b);
   }
-  const primary4h = await loadBars(cfg.primarySymbol, "4h");
-  if (primary4h && primary4h.t.length > 5_000) others.push(primary4h);
+  // cross-timeframe generalization vote: one step away from the native tf
+  const altTf = tf === "1h" ? "4h" : "1h";
+  const primaryAlt = await loadBars(cfg.primarySymbol, altTf);
+  if (primaryAlt && primaryAlt.t.length > (PPY[altTf] ?? 8760) * 1.7) others.push(primaryAlt);
 
   const nTrials = await cx.query(api.pipeline.getCounter, { key: "trials_total" });
   await cx.mutation(api.pipeline.bumpCounter, { key: "trials_total", by: 1 });

@@ -50,7 +50,9 @@ export function walkForward(
     const testEndTs = Math.min(testStart + stepMs, endTs);
     const testStartI = trainEndI + 1;
     const testEndI = indexOfTs(bars.t, testEndTs) - 1;
-    if (testEndI <= testStartI + 10 || trainEndI - trainStartI < 500) { testStart += stepMs; continue; }
+    // minimum usable train span scales with the bar size (1h≈3500, 4h≈875, 1d≈145)
+    const minTrainBars = Math.max(100, Math.floor(0.4 * (cfg.trainMonths ?? 12) * (opts.ppy / 12)));
+    if (testEndI <= testStartI + 8 || trainEndI - trainStartI < minTrainBars) { testStart += stepMs; continue; }
 
     const fit = tune(doc, bars, opts, { startI: trainStartI, endI: trainEndI }, cfg.tuneTrials ?? 40, 1000 + wi);
     // run from train start so indicators are warm, but score only the test slice

@@ -46,6 +46,8 @@ export interface StrategyDoc {
   name: string;
   /** WHY this should work — required from every generator (LLM or GP). */
   hypothesis: string;
+  /** bar timeframe this strategy trades (default "1h"); floors scale with it */
+  tf?: "1h" | "4h" | "1d";
   longEntry: Expr;
   longExit: Expr;
   shortEntry?: Expr;
@@ -170,3 +172,10 @@ export const SLIP_BPS: Record<string, number> = {
 export const DEFAULT_FEE_BPS = 5; // Binance USDT-M taker 0.05% (no VIP)
 
 export const COMPLEXITY_LIMITS = { maxNodes: 48, maxDepth: 10, maxParams: 6, maxPeriod: 500 };
+
+export const VALID_TFS = new Set(["1h", "4h", "1d"]);
+
+/** floor scaling for slower timeframes (trade-count floors etc.) */
+export function tfScale(tf: string | undefined): number {
+  return tf === "4h" ? 0.6 : tf === "1d" ? 0.35 : 1;
+}

@@ -100,6 +100,7 @@ export function validateStrategy(doc: StrategyDoc): string[] {
     const r = doc.risk;
     if (!r || !(r.volTargetAnnual > 0 && r.volTargetAnnual <= 1)) errors.push("risk.volTargetAnnual must be in (0,1]");
     if (!r || !(r.maxLeverage > 0 && r.maxLeverage <= 5)) errors.push("risk.maxLeverage must be in (0,5]");
+    if (doc.tf !== undefined && !["1h", "4h", "1d"].includes(doc.tf)) errors.push(`tf must be 1h|4h|1d`);
     if (!doc.hypothesis || doc.hypothesis.length < 10) errors.push("hypothesis required (state WHY this should work)");
   } catch (err) {
     errors.push(err instanceof Error ? err.message : String(err));
@@ -146,6 +147,7 @@ function strategyCanon(doc: StrategyDoc, mode: "exact" | "family"): string {
     }).filter(Boolean).sort();
     parts.push(ps.join(";"));
     parts.push(`risk:${doc.risk.stopAtrMult ?? "-"}/${doc.risk.trailAtrMult ?? "-"}/${doc.risk.volTargetAnnual}/${doc.risk.maxLeverage}`);
+    parts.push(`tf:${doc.tf ?? "1h"}`);
   }
   return parts.join("|");
 }

@@ -25,15 +25,18 @@ export const ingestCandles = schedules.task({
         });
         logger.log(`${symbol}: ${res.bars} bars (+${res.appended}), ${res.gaps} gaps, src=${res.source}`);
       }
-      // derive 4h for the primary (cross-timeframe validation)
-      const primary = await loadBars(cfg.primarySymbol, cfg.tf);
-      if (primary) {
-        const agg = aggregateBars(primary, "4h");
-        await putJsonGz(candleKey(cfg.primarySymbol, "4h"), agg);
-        await cx.mutation(api.pipeline.upsertDataset, {
-          symbol: cfg.primarySymbol, tf: "4h", firstTs: agg.t[0] ?? 0, lastTs: agg.t[agg.t.length - 1] ?? 0,
-          bars: agg.t.length, gaps: 0, r2Key: candleKey(cfg.primarySymbol, "4h"),
-        });
+      // derive 4h + 1d for EVERY symbol (strategies choose their own timeframe)
+      for (const symbol of cfg.universe) {
+        const base = await loadBars(symbol, cfg.tf);
+        if (!base) continue;
+        for (const target of ["4h", "1d"] as const) {
+          const agg = aggregateBars(base, target);
+          await putJsonGz(candleKey(symbol, target), agg);
+          await cx.mutation(api.pipeline.upsertDataset, {
+            symbol, tf: target, firstTs: agg.t[0] ?? 0, lastTs: agg.t[agg.t.length - 1] ?? 0,
+            bars: agg.t.length, gaps: 0, r2Key: candleKey(symbol, target),
+          });
+        }
       }
       await cx.mutation(api.pipeline.finishRun, { id: runId, status: "ok", summary: JSON.stringify(results) });
       return results;

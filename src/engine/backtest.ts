@@ -132,15 +132,19 @@ export function runBacktestPrepared(
   const equity = new Float64Array(n).fill(opts.startEquity ?? 1);
   let turnoverSum = 0;
   let exposureBars = 0;
+  let bust = false; // leverage honesty: a blown account stays blown
+  const startEq = opts.startEquity ?? 1;
   for (let i = startI + 1; i <= endI; i++) {
+    if (bust) { ret[i] = 0; equity[i] = equity[i - 1]; continue; }
     const r = inp.c[i - 1] > 0 ? inp.c[i] / inp.c[i - 1] - 1 : 0;
     const held = w[i - 1];
     const turnover = Math.abs(w[i - 1] - (i - 2 >= startI - 1 ? w[i - 2] : 0));
     turnoverSum += turnover;
     const fundingCost = held * fundingAtBar[i];
-    ret[i] = held * r - turnover * costRate - fundingCost;
+    ret[i] = Math.max(-0.95, held * r - turnover * costRate - fundingCost);
     equity[i] = equity[i - 1] * (1 + ret[i]);
     if (held !== 0) exposureBars++;
+    if (equity[i] <= 0.05 * startEq) bust = true; // margin death — no resurrection
   }
   for (let i = 0; i < startI + 1; i++) equity[i] = opts.startEquity ?? 1;
 

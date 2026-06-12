@@ -62,13 +62,14 @@ export const paperStep = schedules.task({
     const actives = [...incubating, ...eligible, ...(champion ? [champion] : [])];
     if (!actives.length) { logger.log("no active paper strategies"); return { stepped: 0 }; }
 
-    // load universe bars once
-    const universeBars = new Map<string, Bars>();
-    for (const sym of cfg.universe) {
-      const b = await loadBars(sym, cfg.tf);
-      if (b) universeBars.set(sym, b);
-    }
-    const nSym = universeBars.size || 1;
+    // bars cache keyed by symbol|tf — strategies choose their own timeframe
+    const barsCache = new Map<string, Bars | null>();
+    const getBars = async (sym: string, tf: string): Promise<Bars | null> => {
+      const key = `${sym}|${tf}`;
+      if (!barsCache.has(key)) barsCache.set(key, await loadBars(sym, tf));
+      return barsCache.get(key) ?? null;
+    };
+    const nSym = cfg.universe.length || 1;
     const costRate = (sym: string) => (DEFAULT_FEE_BPS + (SLIP_BPS[sym] ?? 4)) / 10_000;
 
     let stepped = 0;
@@ -78,6 +79,7 @@ export const paperStep = schedules.task({
         const acct = await cx.query(api.paper.getAccount, { candidateId });
         if (!acct || acct.halted) continue;
         const doc = JSON.parse(cand.dsl) as StrategyDoc;
+        const candTf = doc.tf ?? cfg.tf;
         const params = cand.bestParams ? JSON.parse(cand.bestParams) as Record<string, number> : {};
         const positions = await cx.query(api.paper.positionsFor, { candidateId });
         const posBySym = new Map(positions.map((p) => [p.symbol, p]));
@@ -88,7 +90,9 @@ export const paperStep = schedules.task({
         const newPositions: { symbol: string; weight: number; entryPrice?: number }[] = [];
         const trades: { symbol: string; ts: number; weightFrom: number; weightTo: number; price: number; fillPrice: number; costUsd: number; note?: string }[] = [];
 
-        for (const [sym, bars] of universeBars) {
+        for (const sym of cfg.universe) {
+          const bars = await getBars(sym, candTf);
+          if (!bars) continue;
           const cur = posBySym.get(sym);
           const prevWeight = cur?.weight ?? 0;
           const prevPrice = cur?.entryPrice ?? 0;
