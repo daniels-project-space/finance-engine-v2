@@ -10,6 +10,7 @@ import { artifactKey, putJsonGz } from "../lib/storage";
 import { canonicalHash, familyHash, validateStrategy } from "../engine/dsl";
 import { crossoverStrategies, mutateStrategy, randomStrategy, type MutationHint } from "../engine/evolve";
 import { SEED_LIBRARY } from "../engine/library";
+import { IMPORTED_LIBRARY } from "../engine/imports";
 import { evaluateSealed, runGauntlet } from "../engine/gauntlet";
 import { propose } from "../engine/llm";
 import { PPY, type Bars, type StrategyDoc } from "../engine/types";
@@ -70,12 +71,18 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
   const seedBase = (await cx.mutation(api.pipeline.bumpCounter, { key: "seed", by: 1 })) * 7919;
   const proposals: { doc: StrategyDoc; source: string; parentIds?: string[] }[] = [];
 
-  // Library backfill: any research-backed seed not yet registered goes first.
-  // The founders anchor the ranking; evolution refines from there.
+  // Library backfill: any research-backed seed or imported published strategy
+  // not yet registered goes first. The founders anchor the ranking.
   for (const seedDoc of SEED_LIBRARY) {
     const hash = canonicalHash(seedDoc);
     if (!(await cx.query(api.candidates.hashExists, { hash }))) {
       proposals.push({ doc: seedDoc, source: "seed" });
+    }
+  }
+  for (const impDoc of IMPORTED_LIBRARY) {
+    const hash = canonicalHash(impDoc);
+    if (!(await cx.query(api.candidates.hashExists, { hash }))) {
+      proposals.push({ doc: impDoc, source: "imported" });
     }
   }
 

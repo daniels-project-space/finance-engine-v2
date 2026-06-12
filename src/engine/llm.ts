@@ -32,6 +32,7 @@ Expr grammar (recursive):
  {"op":IND,"src":Expr,"period":Expr}                    // IND: ema sma wma rsi atr stdev highest lowest lag zscore slope pctrank median roc; period must be const or param
  {"op":"add|sub|mul|div|min2|max2","a":Expr,"b":Expr}
  {"op":"abs|neg|log|sign|sqrt","a":Expr}
+ {"op":"hourutc"} {"op":"dowutc"}                        // UTC hour 0-23 / day-of-week 0=Sun..6 (seasonality)
  {"op":"gt|lt|crossover|crossunder","a":Expr,"b":Expr}  // -> boolean
  {"op":"and|or","a":Expr,"b":Expr} {"op":"not","a":Expr}
 

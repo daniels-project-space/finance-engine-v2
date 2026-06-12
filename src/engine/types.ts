@@ -15,6 +15,8 @@ export type LogicOp = "and" | "or";
 export type Expr =
   | { op: "price"; field: PriceField }
   | { op: "funding" } // last-known perp funding rate per bar (carry/crowding signal)
+  | { op: "hourutc" } // bar-open hour in UTC, 0-23 (intraday seasonality)
+  | { op: "dowutc" }  // bar-open day of week UTC, 0=Sun..6=Sat (calendar seasonality)
   | { op: "const"; value: number }
   | { op: "param"; name: string }
   | { op: IndicatorOp; src: Expr; period: Expr }

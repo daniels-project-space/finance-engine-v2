@@ -5,6 +5,9 @@ export interface CompiledInputs {
   o: Float64Array; h: Float64Array; l: Float64Array; c: Float64Array; v: Float64Array;
   /** last-known funding rate per bar (forward-filled from 8h stamps; 0 before first) */
   f: Float64Array;
+  /** bar-open hour UTC (0-23) and day-of-week UTC (0=Sun..6=Sat) */
+  hour: Float64Array;
+  dow: Float64Array;
 }
 
 export function toArrays(bars: Bars): CompiledInputs {
@@ -18,10 +21,17 @@ export function toArrays(bars: Bars): CompiledInputs {
       f[i] = last;
     }
   }
+  const hour = new Float64Array(n);
+  const dow = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const days = Math.floor(bars.t[i] / 86_400_000);
+    hour[i] = Math.floor(bars.t[i] / 3_600_000) % 24;
+    dow[i] = (days + 4) % 7; // epoch day 0 was a Thursday
+  }
   return {
     o: Float64Array.from(bars.o), h: Float64Array.from(bars.h),
     l: Float64Array.from(bars.l), c: Float64Array.from(bars.c), v: Float64Array.from(bars.v),
-    f,
+    f, hour, dow,
   };
 }
 
@@ -39,6 +49,8 @@ function key(e: Expr, params: Record<string, number>): string {
   switch (n.op) {
     case "price": return `price:${n.field}`;
     case "funding": return "funding";
+    case "hourutc": return "hourutc";
+    case "dowutc": return "dowutc";
     case "const": return `c:${n.value}`;
     case "param": return `pv:${params[n.name as string]}`;
     default: {
@@ -64,6 +76,8 @@ export function evalNum(e: Expr, inp: CompiledInputs, params: Record<string, num
       break;
     }
     case "funding": { out = inp.f; break; }
+    case "hourutc": { out = inp.hour; break; }
+    case "dowutc": { out = inp.dow; break; }
     case "const": { out = new Float64Array(len).fill(n.value as number); break; }
     case "param": { out = new Float64Array(len).fill(params[n.name as string]); break; }
     case "ema": case "sma": case "wma": case "rsi": case "stdev": case "highest": case "lowest":
