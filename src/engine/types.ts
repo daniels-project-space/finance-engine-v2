@@ -14,6 +14,7 @@ export type LogicOp = "and" | "or";
 
 export type Expr =
   | { op: "price"; field: PriceField }
+  | { op: "funding" } // last-known perp funding rate per bar (carry/crowding signal)
   | { op: "const"; value: number }
   | { op: "param"; name: string }
   | { op: IndicatorOp; src: Expr; period: Expr }
@@ -120,11 +121,13 @@ export interface GateFloors {
   trainMinSharpe: number;        // 0.8
   trainMinTradesPerYear: number; // 30
   trainMaxDD: number;            // -0.35
-  wfMinMeanSharpe: number;       // 0.5
-  wfMinPctPositive: number;      // 0.55
+  wfMinMeanSharpe: number;       // 0.5  (single-symbol, BTC)
+  wfMinPctPositive: number;      // 0.45 (single-symbol; portfolio floor is the strict one)
   wfWorstMonth: number;          // -0.15
   wfMaxDD: number;               // -0.30
   crossSymbolMinPositive: number;// 3 (of universe)
+  portMinSharpe: number;         // 0.7  (deployed equal-weight portfolio, all OOS)
+  portMinPctPositive: number;    // 0.55 (portfolio monthly consistency — deployment level)
   minDSR: number;                // 0.95
   maxPermutationP: number;       // 0.05
   stressSlipMultSurvive: number; // 3 (sharpe@3x > 50% base)
@@ -141,10 +144,12 @@ export const DEFAULT_FLOORS: GateFloors = {
   trainMinTradesPerYear: 30,
   trainMaxDD: -0.35,
   wfMinMeanSharpe: 0.5,
-  wfMinPctPositive: 0.55,
+  wfMinPctPositive: 0.45,
   wfWorstMonth: -0.15,
   wfMaxDD: -0.3,
   crossSymbolMinPositive: 3,
+  portMinSharpe: 0.7,
+  portMinPctPositive: 0.55,
   minDSR: 0.95,
   maxPermutationP: 0.05,
   stressSlipMultSurvive: 3,

@@ -5,7 +5,7 @@ import { gauntletTask } from "./gauntlet";
 
 export const evolveCycle = schedules.task({
   id: "evolve-cycle",
-  cron: "20 */6 * * *",
+  cron: "20 */3 * * *",
   machine: "small-2x",
   maxDuration: 1500,
   run: async () => {

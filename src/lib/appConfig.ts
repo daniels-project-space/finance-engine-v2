@@ -28,7 +28,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   killSwitch: { dailyDD: -0.05, weeklyDD: -0.10, monthlyDD: -0.20 },
   // GP-dominant refinement of the scored board; random grammar samples are a
   // trickle for diversity only — the library seeds are the real fresh blood.
-  evo: { batchGp: 18, batchFresh: 2, batchLlm: 4, maxCandidatesPerDay: 150 },
+  evo: { batchGp: 18, batchFresh: 2, batchLlm: 4, maxCandidatesPerDay: 240 },
   llmDailyBudgetUsd: 1.0,
 };
 

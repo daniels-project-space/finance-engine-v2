@@ -23,6 +23,7 @@ export function checkExpr(e: unknown, params: Record<string, ParamSpec>, depth =
     if (!PRICE_FIELDS.has(node.field as string)) throw new DslError(`bad price field ${node.field}`);
     return "num";
   }
+  if (op === "funding") return "num";
   if (op === "const") {
     if (typeof node.value !== "number" || !Number.isFinite(node.value)) throw new DslError("bad const");
     return "num";
@@ -110,6 +111,7 @@ function canon(e: Expr, mode: "exact" | "family", paramOrder: Map<string, number
   const n = e as unknown as Record<string, unknown> & { op: string };
   switch (n.op) {
     case "price": return `price:${n.field}`;
+    case "funding": return "funding";
     case "const": {
       if (mode === "family") return "#";
       const v = n.value as number;

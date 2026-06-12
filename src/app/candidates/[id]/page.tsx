@@ -19,7 +19,7 @@ export default function CandidateDetail({ params }: { params: Promise<{ id: stri
   if (!cand) return <div className="hud">loading…</div>;
   const metrics = cand.metrics ? (JSON.parse(cand.metrics) as Record<string, number>) : {};
   const equity = snaps ? [...snaps].reverse().map((s) => s.equity) : [];
-  let curves: { full?: Curve; wf?: Curve; sealed?: Curve } = {};
+  let curves: { full?: Curve; wf?: Curve; sealed?: Curve; port?: Curve } = {};
   try { curves = cand.curves ? JSON.parse(cand.curves) : {}; } catch {}
 
   return (
@@ -34,8 +34,9 @@ export default function CandidateDetail({ params }: { params: Promise<{ id: stri
         {cand.failedReason && <p className="text-down mt-2 text-sm num">✗ {cand.failedStage}: {cand.failedReason}</p>}
         <div className="flex gap-8 mt-5 flex-wrap">
           <Stat label="Composite" value={fmtNum(cand.composite)} tone="gold" />
+          <Stat label="Portfolio OOS" value={fmtNum(metrics.portOosSharpe)} tone={metrics.portOosSharpe > 0 ? "up" : undefined} />
           <Stat label="Train Sharpe" value={fmtNum(metrics.trainSharpe)} />
-          <Stat label="WF OOS Sharpe" value={fmtNum(metrics.wfPooledSharpe)} />
+          <Stat label="BTC WF Sharpe" value={fmtNum(metrics.wfPooledSharpe)} />
           <Stat label="WF positive months" value={fmtPct(metrics.wfPctPositive, 0)} />
           <Stat label="Max DD" value={fmtPct(metrics.fullMaxDD, 0)} tone={(metrics.fullMaxDD ?? 0) < -0.25 ? "down" : undefined} />
           <Stat label="Win rate" value={fmtPct(metrics.winRate, 0)} />
@@ -56,10 +57,13 @@ export default function CandidateDetail({ params }: { params: Promise<{ id: stri
             ...(curves.sealed ? [{ name: "SEALED (never seen)", color: "#e8b34b", curve: curves.sealed }] : []),
           ]} />
           {curves.full && <DrawdownChart curve={curves.full} />}
-          {curves.wf && (
+          {(curves.wf || curves.port) && (
             <>
-              <div className="hud pt-2">Walk-forward out-of-sample only (re-tuned monthly — the honest curve)</div>
-              <LineChart series={[{ name: "WF OOS", color: "#2dd4a7", curve: curves.wf }]} height={150} />
+              <div className="hud pt-2">Walk-forward out-of-sample only (re-tuned monthly — the honest curves)</div>
+              <LineChart series={[
+                ...(curves.port ? [{ name: "PORTFOLIO (5 pairs, deployed)", color: "#e8b34b", curve: curves.port }] : []),
+                ...(curves.wf ? [{ name: "BTC only", color: "#2dd4a7", curve: curves.wf }] : []),
+              ]} height={170} />
             </>
           )}
         </section>

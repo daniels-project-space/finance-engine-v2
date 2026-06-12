@@ -117,6 +117,27 @@ async function main() {
   const libRes = runBacktest(SEED_LIBRARY[0], bars, { fast: 16, slow: 64 }, opts);
   check("ewmac seed runs", Number.isFinite(libRes.metrics.sharpe) && libRes.metrics.trades > 5, `trades=${libRes.metrics.trades}`);
 
+  console.log("— funding op + portfolio merge —");
+  const { mergePortfolio, seriesStats } = await import("../src/engine/gauntlet");
+  const fundingStrategy: StrategyDoc = {
+    name: "smoke_funding", hypothesis: "smoke test: contrarian to extreme funding readings.",
+    longEntry: { op: "lt", a: { op: "funding" }, b: { op: "const", value: -0.0002 } },
+    longExit: { op: "gt", a: { op: "funding" }, b: { op: "const", value: 0 } },
+    params: {}, risk: { volTargetAnnual: 0.25, maxLeverage: 2 },
+  };
+  check("funding strategy validates", validateStrategy(fundingStrategy).length === 0, JSON.stringify(validateStrategy(fundingStrategy)));
+  const fRng = mulberry32(3);
+  const fBars2: Bars = { ...bars, fundingT: bars.t.filter((_, i) => i % 8 === 0), fundingR: bars.t.filter((_, i) => i % 8 === 0).map(() => (fRng() - 0.5) * 0.002) };
+  const fRes2 = runBacktest(fundingStrategy, fBars2, {}, opts);
+  check("funding strategy trades", fRes2.metrics.trades > 5 && Number.isFinite(fRes2.metrics.sharpe), `trades=${fRes2.metrics.trades}`);
+  const mp = mergePortfolio([
+    { t: Float64Array.from([1, 2, 3]), ret: Float64Array.from([0.01, 0.02, -0.01]) },
+    { t: Float64Array.from([2, 3, 4]), ret: Float64Array.from([0.02, -0.03, 0.01]) },
+  ]);
+  check("portfolio merge aligns by ts", mp.t.length === 4 && Math.abs(mp.ret[1] - 0.02) < 1e-12, JSON.stringify(mp));
+  const ss = seriesStats(mp.ret, mp.t, 8760);
+  check("portfolio stats finite", Number.isFinite(ss.sharpe) && ss.maxDD <= 0);
+
   console.log("— GP generation —");
   let valid = 0;
   for (let s = 0; s < 50; s++) if (validateStrategy(randomStrategy(s)).length === 0) valid++;

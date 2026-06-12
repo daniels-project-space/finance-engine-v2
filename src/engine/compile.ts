@@ -3,12 +3,25 @@ import { COMPLEXITY_LIMITS, type Bars, type Expr } from "./types";
 
 export interface CompiledInputs {
   o: Float64Array; h: Float64Array; l: Float64Array; c: Float64Array; v: Float64Array;
+  /** last-known funding rate per bar (forward-filled from 8h stamps; 0 before first) */
+  f: Float64Array;
 }
 
 export function toArrays(bars: Bars): CompiledInputs {
+  const n = bars.t.length;
+  const f = new Float64Array(n);
+  if (bars.fundingT && bars.fundingR && bars.fundingT.length) {
+    let fi = 0;
+    let last = 0;
+    for (let i = 0; i < n; i++) {
+      while (fi < bars.fundingT.length && bars.fundingT[fi] <= bars.t[i]) { last = bars.fundingR[fi]; fi++; }
+      f[i] = last;
+    }
+  }
   return {
     o: Float64Array.from(bars.o), h: Float64Array.from(bars.h),
     l: Float64Array.from(bars.l), c: Float64Array.from(bars.c), v: Float64Array.from(bars.v),
+    f,
   };
 }
 
@@ -25,6 +38,7 @@ function key(e: Expr, params: Record<string, number>): string {
   const n = e as unknown as Record<string, unknown> & { op: string };
   switch (n.op) {
     case "price": return `price:${n.field}`;
+    case "funding": return "funding";
     case "const": return `c:${n.value}`;
     case "param": return `pv:${params[n.name as string]}`;
     default: {
@@ -49,6 +63,7 @@ export function evalNum(e: Expr, inp: CompiledInputs, params: Record<string, num
       out = f === "open" ? inp.o : f === "high" ? inp.h : f === "low" ? inp.l : f === "close" ? inp.c : inp.v;
       break;
     }
+    case "funding": { out = inp.f; break; }
     case "const": { out = new Float64Array(len).fill(n.value as number); break; }
     case "param": { out = new Float64Array(len).fill(params[n.name as string]); break; }
     case "ema": case "sma": case "wma": case "rsi": case "stdev": case "highest": case "lowest":

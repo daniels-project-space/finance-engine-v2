@@ -187,6 +187,25 @@ export const SEED_LIBRARY: StrategyDoc[] = [
     params: { emaN: p(14, 40, 20), mult: { min: 1, max: 3, default: 2 }, volTh: { min: 0.4, max: 0.9, default: 0.7 } },
     risk: MEANREV_RISK,
   },
+  // ------------------------------------------------------------- FUNDING / CARRY
+  {
+    name: "seed_funding_carry_contrarian",
+    hypothesis: "Perp funding extremes are paid crowding signals (Koijen et al. 'Carry'; crypto-native: extreme negative funding = crowded shorts paying you to take the squeeze side, and liquidation cascades resolve against the crowd). Enter against extreme funding, collect the carry, exit when funding normalizes.",
+    longEntry: lt({ op: "funding" }, { op: "neg", a: P("fundTh") }),
+    longExit: gt({ op: "funding" }, k(0)),
+    shortEntry: gt({ op: "funding" }, P("fundTh")),
+    shortExit: lt({ op: "funding" }, k(0)),
+    params: { fundTh: { min: 0.0001, max: 0.001, default: 0.0004 } },
+    risk: { volTargetAnnual: 0.25, maxLeverage: 2, stopAtrMult: 3 },
+  },
+  {
+    name: "seed_funding_gated_trend",
+    hypothesis: "Trend entries gated by funding crowding: a breakout that the whole market is already long (high positive funding) has weak forward returns (late-crowd entries fuel liquidation cascades). Only take trend signals while funding shows the trade is NOT crowded.",
+    longEntry: and(crossover(ema(c, P("fast")), ema(c, P("slow"))), lt({ op: "funding" }, P("crowdTh"))),
+    longExit: crossunder(ema(c, P("fast")), ema(c, P("slow"))),
+    params: { fast: p(10, 30, 16), slow: p(50, 160, 80), crowdTh: { min: 0.0001, max: 0.0008, default: 0.0003 } },
+    risk: TREND_RISK,
+  },
   {
     name: "seed_zscore_vwapless_fade",
     hypothesis: "Short-horizon overreaction fade (Lehmann 1990 reversal; crypto microstructure: liquidation cascades overshoot): a >2σ one-bar return against an otherwise flat regime partially retraces as market makers replenish. Tight stop — when it's wrong it's a regime break.",

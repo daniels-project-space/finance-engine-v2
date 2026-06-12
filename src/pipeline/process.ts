@@ -168,8 +168,9 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
 
   if (!report.passed) {
     // partial composite so near-misses still rank in the tournament
-    const partial = report.metrics.wfPooledSharpe !== undefined
-      ? 0.5 * report.metrics.wfPooledSharpe + 0.2 * (report.metrics.fullSharpe ?? 0)
+    const wfScore = report.metrics.portOosSharpe ?? report.metrics.wfPooledSharpe;
+    const partial = wfScore !== undefined
+      ? 0.5 * wfScore + 0.2 * (report.metrics.fullSharpe ?? 0)
       : undefined;
     await cx.mutation(api.candidates.updateStage, {
       id: candidateId, stage: "failed",
@@ -194,15 +195,16 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
     await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: "S6-sealed", failedReason: "seal already consumed for this hash" });
     return { passed: false, stage: "S6-sealed" };
   }
-  const sealed = evaluateSealed(doc, primary, report.bestParams ?? {}, sealTs, cfg.floors);
+  const sameTf = [primary, ...others.filter((b) => b.tf === primary.tf)];
+  const sealed = evaluateSealed(doc, sameTf, report.bestParams ?? {}, sealTs, cfg.floors);
   await cx.mutation(api.pipeline.recordHoldout, { hash: cand.hash, result: JSON.stringify({ ...sealed, curve: undefined }), passed: sealed.passed });
   await cx.mutation(api.pipeline.addGateReport, {
     candidateId, stage: "S6-sealed", passed: sealed.passed, reason: sealed.reason,
     report: JSON.stringify({ sharpe: sealed.sharpe, ret: sealed.ret, maxDD: sealed.maxDD, trades: sealed.trades }), durationMs: 0,
   });
 
-  const composite = 0.5 * (report.metrics.wfPooledSharpe ?? 0) + 0.3 * sealed.sharpe + 0.2 * (report.metrics.fullSharpe ?? 0);
-  const metrics = { ...report.metrics, sealedSharpe: sealed.sharpe, sealedRet: sealed.ret, sealedMaxDD: sealed.maxDD, sealedTrades: sealed.trades, composite };
+  const composite = 0.5 * (report.metrics.portOosSharpe ?? report.metrics.wfPooledSharpe ?? 0) + 0.3 * sealed.sharpe + 0.2 * (report.metrics.fullSharpe ?? 0);
+  const metrics = { ...report.metrics, sealedSharpe: sealed.sharpe, sealedRet: sealed.ret, sealedMaxDD: sealed.maxDD, sealedCagr: sealed.cagr, sealedTrades: sealed.trades, composite };
 
   if (!sealed.passed) {
     await cx.mutation(api.candidates.updateStage, {
@@ -227,8 +229,16 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   });
   await cx.mutation(api.pipeline.addLesson, {
     source: cand.source, candidateId,
-    text: `PASSED full gauntlet + sealed holdout: "${cand.name}" (composite ${composite.toFixed(2)}, sealed sharpe ${sealed.sharpe.toFixed(2)}). Mechanism: ${cand.hypothesis.slice(0, 120)}`,
+    text: `PASSED full gauntlet + sealed holdout: "${cand.name}" (composite ${composite.toFixed(2)}, sealed portfolio sharpe ${sealed.sharpe.toFixed(2)}). Mechanism: ${cand.hypothesis.slice(0, 120)}`,
   });
+  const { sendTelegram } = await import("../lib/telegram");
+  const target = (report.metrics.portOosSharpe ?? 0) >= 1.5 && (sealed.cagr ?? 0) >= 0.3;
+  await sendTelegram(
+    `${target ? "🎯 *TARGET-CLASS STRATEGY*" : "🏆 *Gauntlet survivor*"} — finance-engine-v2\n` +
+    `"${cand.name}" entered 30-day paper incubation\n` +
+    `Portfolio OOS Sharpe: ${(report.metrics.portOosSharpe ?? 0).toFixed(2)} · Sealed Sharpe: ${sealed.sharpe.toFixed(2)} · Sealed CAGR: ${((sealed.cagr ?? 0) * 100).toFixed(0)}% · MaxDD: ${((report.metrics.portMaxDD ?? 0) * 100).toFixed(0)}%\n` +
+    `${cand.hypothesis.slice(0, 160)}`,
+  );
   log(`PASSED -> incubating, composite=${composite.toFixed(2)}`);
   return { passed: true, composite };
 }

@@ -68,6 +68,13 @@ function genFeature(rng: Rng, params: Record<string, ParamSpec>, depth: number):
 function genTrigger(rng: Rng, params: Record<string, ParamSpec>): Expr {
   const close: Expr = { op: "price", field: "close" };
   const kind = rng();
+  if (kind < 0.12) {
+    // funding/carry trigger: act against crowded positioning
+    const th = freshParam(params, 0.0001, 0.001, 0.0003, false);
+    return rng() < 0.5
+      ? { op: "lt", a: { op: "funding" }, b: { op: "neg", a: th } }
+      : { op: "gt", a: { op: "funding" }, b: th };
+  }
   if (kind < 0.3) {
     // MA cross
     const fast: Expr = { op: pick(rng, SMOOTHERS), src: close, period: freshParam(params, 3, 40, randInt(rng, 5, 20)) };
@@ -94,6 +101,10 @@ function genTrigger(rng: Rng, params: Record<string, ParamSpec>): Expr {
 
 function genFilter(rng: Rng, params: Record<string, ParamSpec>): Expr {
   const close: Expr = { op: "price", field: "close" };
+  if (rng() < 0.2) {
+    // anti-crowding gate: only trade when funding is below a crowd threshold
+    return { op: "lt", a: { op: "funding" }, b: freshParam(params, 0.0001, 0.0008, 0.0003, false) };
+  }
   if (rng() < 0.5) {
     // regime: price above/below long MA
     const ma: Expr = { op: "sma", src: close, period: freshParam(params, 100, 400, 200) };

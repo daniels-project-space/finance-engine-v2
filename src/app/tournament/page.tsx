@@ -34,6 +34,7 @@ function Row({ r, rank }: { r: Parsed; rank: number }) {
       <td><StageBadge stage={r.stage} /></td>
       <td className="px-2"><MiniCurve curve={r.wfCurve} /></td>
       <td className="num text-right text-gold">{fmtNum(r.composite)}</td>
+      <td className="num text-right text-up">{fmtNum(r.m.portOosSharpe)}</td>
       <td className="num text-right">{fmtNum(r.m.wfPooledSharpe)}</td>
       <td className="num text-right">{fmtNum(r.m.sealedSharpe)}</td>
       <td className="num text-right">{fmtNum(r.m.fullSharpe)}</td>
@@ -75,7 +76,7 @@ export default function TournamentPage() {
           <table className="w-full text-sm">
             <thead><tr className="hud text-left">
               <th className="pb-2">#</th><th>strategy</th><th>stage</th><th className="px-2">WF OOS equity</th>
-              <th className="text-right">comp</th><th className="text-right">WF shrp</th><th className="text-right">sealed</th>
+              <th className="text-right">comp</th><th className="text-right">PORT</th><th className="text-right">BTC wf</th><th className="text-right">sealed</th>
               <th className="text-right">full</th><th className="text-right">maxDD</th><th className="text-right">win%</th>
               <th className="text-right">trades</th><th className="text-right">DSR</th>
             </tr></thead>
@@ -94,7 +95,7 @@ export default function TournamentPage() {
           <table className="w-full text-sm">
             <thead><tr className="hud text-left">
               <th className="pb-2">#</th><th>strategy</th><th>stage</th><th className="px-2">WF OOS equity</th>
-              <th className="text-right">comp</th><th className="text-right">WF shrp</th><th className="text-right">sealed</th>
+              <th className="text-right">comp</th><th className="text-right">PORT</th><th className="text-right">BTC wf</th><th className="text-right">sealed</th>
               <th className="text-right">full</th><th className="text-right">maxDD</th><th className="text-right">win%</th>
               <th className="text-right">trades</th><th className="text-right">DSR</th>
             </tr></thead>

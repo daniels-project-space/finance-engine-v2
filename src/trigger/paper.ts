@@ -23,6 +23,7 @@ function targetWeight(doc: StrategyDoc, params: Record<string, number>, bars: Ba
     symbol: bars.symbol, tf: bars.tf,
     t: bars.t.slice(from), o: bars.o.slice(from), h: bars.h.slice(from),
     l: bars.l.slice(from), c: bars.c.slice(from), v: bars.v.slice(from),
+    fundingT: bars.fundingT, fundingR: bars.fundingR, // funding ops need the carry series
   };
   const inp = toArrays(slice);
   const sig = computeSignals(doc, inp, params);

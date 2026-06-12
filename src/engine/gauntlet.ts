@@ -48,7 +48,7 @@ export interface GauntletReport {
   stages: StageOutcome[];
   bestParams?: Record<string, number>;
   /** downsampled equity paths for the dashboard */
-  curves?: { full?: Curve; wf?: Curve };
+  curves?: { full?: Curve; wf?: Curve; port?: Curve };
   metrics: {
     trainSharpe?: number;
     wfPooledSharpe?: number;
@@ -66,8 +66,55 @@ export interface GauntletReport {
     permutationP?: number;
     bootstrapP5?: number;
     crossSymbolPositive?: number;
+    /** deployed equal-weight portfolio across the universe, all returns OOS */
+    portOosSharpe?: number;
+    portPctPositive?: number;
+    portMaxDD?: number;
     composite?: number;
   };
+}
+
+/** Equal-weight merge of per-bar OOS return streams aligned by timestamp. */
+export function mergePortfolio(streams: { t: Float64Array; ret: Float64Array }[]): { t: number[]; ret: number[] } {
+  const acc = new Map<number, { s: number; n: number }>();
+  for (const st of streams) {
+    for (let i = 0; i < st.t.length; i++) {
+      const ts = st.t[i];
+      const cur = acc.get(ts);
+      if (cur) { cur.s += st.ret[i]; cur.n++; }
+      else acc.set(ts, { s: st.ret[i], n: 1 });
+    }
+  }
+  const t = Array.from(acc.keys()).sort((a, b) => a - b);
+  // equal weight across the FULL universe: idle symbols contribute 0, so divide by stream count
+  const N = Math.max(1, streams.length);
+  return { t, ret: t.map((ts) => (acc.get(ts) as { s: number; n: number }).s / N) };
+}
+
+export function seriesStats(ret: number[], t: number[], ppy: number) {
+  const n = Math.max(1, ret.length);
+  let s = 0, sq = 0;
+  for (const r of ret) { s += r; sq += r * r; }
+  const mean = s / n, sd = Math.sqrt(Math.max(0, sq / n - mean * mean));
+  const sharpe = sd > 1e-12 ? (mean / sd) * Math.sqrt(ppy) : 0;
+  let eq = 1, peak = 1, maxDD = 0;
+  const monthly = new Map<string, number>();
+  const eqOut = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    eq *= 1 + ret[i];
+    eqOut[i] = eq;
+    if (eq > peak) peak = eq;
+    const d = eq / peak - 1; if (d < maxDD) maxDD = d;
+    const dte = new Date(t[i]);
+    const ym = `${dte.getUTCFullYear()}-${String(dte.getUTCMonth() + 1).padStart(2, "0")}`;
+    monthly.set(ym, (monthly.get(ym) ?? 1) * (1 + ret[i]));
+  }
+  const months = Array.from(monthly.values());
+  const pctPositive = months.length ? months.filter((g) => g > 1).length / months.length : 0;
+  const years = n / ppy;
+  const totalRet = eq - 1;
+  const cagr = years > 0.2 && eq > 0 ? Math.pow(eq, 1 / years) - 1 : 0;
+  return { sharpe, maxDD, pctPositive, equity: eqOut, totalRet, cagr, months: months.length };
 }
 
 export function optsFor(symbol: string, tf: string) {
@@ -165,20 +212,35 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
   stages.push({ stage: "S3-walkforward", passed: true, durationMs: Date.now() - started, detail: summarizeWf(wf) });
   g.log?.(`S3 pass oosSharpe=${wf.pooledSharpe.toFixed(2)} pos=${(wf.pctPositive * 100).toFixed(0)}%`);
 
-  // ---- S4 cross-symbol generalization --------------------------------------
+  // ---- S4 cross-symbol generalization + DEPLOYED-PORTFOLIO floors ----------
+  // The strategy is paper-traded equal-weight across the universe, so the
+  // binding consistency/Sharpe floors apply to that portfolio (all returns OOS
+  // from re-tuned walk-forwards). Diversification earns score honestly here.
   started = t0();
   let positive = 1; // primary already positive by S3
   const perSymbol: Record<string, number> = { [primary.symbol]: wf.pooledSharpe };
+  const portStreams: { t: Float64Array; ret: Float64Array }[] = [{ t: wf.pooledT, ret: wf.pooledRet }];
   for (const other of g.others) {
     const oOpts = optsFor(other.symbol, other.tf);
-    const owf = walkForward(doc, other, oOpts, { trainMonths: 12, stepMonths: 2, tuneTrials: 25, endTs: g.sealTs });
-    perSymbol[other.symbol] = owf.pooledSharpe;
+    const samePane = other.tf === primary.tf;
+    const owf = walkForward(doc, other, oOpts, { trainMonths: 12, stepMonths: samePane ? 1 : 2, tuneTrials: 25, endTs: g.sealTs });
+    perSymbol[`${other.symbol}@${other.tf}`] = owf.pooledSharpe;
     if (owf.pooledSharpe > 0 && owf.pctPositive >= 0.5) positive++;
+    if (samePane) portStreams.push({ t: owf.pooledT, ret: owf.pooledRet });
   }
   metrics.crossSymbolPositive = positive;
   if (positive < floors.crossSymbolMinPositive) return fail("S4-cross-symbol", `WF-positive on ${positive}/${g.others.length + 1} symbols < ${floors.crossSymbolMinPositive}`, started, perSymbol);
-  stages.push({ stage: "S4-cross-symbol", passed: true, durationMs: Date.now() - started, detail: perSymbol });
-  g.log?.(`S4 pass positive=${positive}`);
+
+  const port = mergePortfolio(portStreams);
+  const ps = seriesStats(port.ret, port.t, opts.ppy);
+  metrics.portOosSharpe = ps.sharpe;
+  metrics.portPctPositive = ps.pctPositive;
+  metrics.portMaxDD = ps.maxDD;
+  curves.port = downsampleCurve(port.t, ps.equity, 0, port.t.length - 1, 240);
+  if (ps.sharpe < floors.portMinSharpe) return fail("S4-portfolio", `portfolio OOS sharpe ${ps.sharpe.toFixed(2)} < ${floors.portMinSharpe}`, started, { ...perSymbol, portfolio: ps.sharpe });
+  if (ps.pctPositive < floors.portMinPctPositive) return fail("S4-portfolio", `portfolio ${(ps.pctPositive * 100).toFixed(0)}% positive months < ${floors.portMinPctPositive * 100}%`, started, { ...perSymbol, portfolio: ps.sharpe, pctPositive: ps.pctPositive });
+  stages.push({ stage: "S4-cross-symbol", passed: true, durationMs: Date.now() - started, detail: { ...perSymbol, portfolioSharpe: ps.sharpe, portfolioPctPositive: ps.pctPositive, portfolioMaxDD: ps.maxDD } });
+  g.log?.(`S4 pass positive=${positive} portfolio=${ps.sharpe.toFixed(2)}`);
 
   // ---- S5 statistics (on full pre-seal run with WF-median params) ----------
   started = t0();
@@ -212,37 +274,42 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
   if (!stress.crisisSurvives) return fail("S5b-stress", `crisis window DD breach`, started, slimStress(stress));
   stages.push({ stage: "S5b-stress", passed: true, durationMs: Date.now() - started, detail: slimStress(stress) });
 
-  metrics.composite = 0.5 * (metrics.wfPooledSharpe ?? 0) + 0.2 * (metrics.fullSharpe ?? 0); // sealed adds 0.3 later
+  // composite is keyed to the DEPLOYED portfolio; sealed (also portfolio) adds 0.3 later
+  metrics.composite = 0.5 * (metrics.portOosSharpe ?? 0) + 0.2 * (metrics.fullSharpe ?? 0);
   return { passed: true, stages, metrics, bestParams: finalParams, curves };
 }
 
-/** S6 sealed holdout math (one-shot enforcement lives in the task layer). */
+/** S6 sealed holdout math on the DEPLOYED equal-weight portfolio (one-shot
+ *  enforcement lives in the task layer). universeBars = all same-tf symbols. */
 export function evaluateSealed(
-  doc: StrategyDoc, bars: Bars, params: Record<string, number>, sealTs: number, floors: GateFloors,
-): { passed: boolean; reason?: string; sharpe: number; ret: number; maxDD: number; trades: number; curve: Curve } {
-  const opts = optsFor(bars.symbol, bars.tf);
-  const sealI = indexOfTs(bars.t, sealTs);
-  const endI = bars.t.length - 1;
-  const warmStart = Math.max(1, sealI - 1000);
-  const res = runBacktest(doc, bars, params, opts, { startI: warmStart, endI });
-  const sealedEq = new Float64Array(endI + 1).fill(1);
-  let s = 0, sq = 0, g = 1, eq = 1, peak = 1, dd = 0, trades = 0;
-  for (let i = sealI; i <= endI; i++) {
-    const r = res.ret[i]; s += r; sq += r * r; g *= 1 + r;
-    eq *= 1 + r; if (eq > peak) peak = eq; const dde = eq / peak - 1; if (dde < dd) dd = dde;
-    sealedEq[i] = eq;
+  doc: StrategyDoc, universeBars: Bars[], params: Record<string, number>, sealTs: number, floors: GateFloors,
+): { passed: boolean; reason?: string; sharpe: number; ret: number; maxDD: number; cagr: number; trades: number; curve: Curve } {
+  const ppy = PPY[universeBars[0].tf] ?? 8760;
+  let trades = 0;
+  const streams: { t: Float64Array; ret: Float64Array }[] = [];
+  for (const bars of universeBars) {
+    const opts = optsFor(bars.symbol, bars.tf);
+    const sealI = indexOfTs(bars.t, sealTs);
+    const endI = bars.t.length - 1;
+    if (endI - sealI < 100) continue;
+    const warmStart = Math.max(1, sealI - 1000);
+    const res = runBacktest(doc, bars, params, opts, { startI: warmStart, endI });
+    const t = new Float64Array(endI - sealI + 1);
+    const r = new Float64Array(endI - sealI + 1);
+    for (let i = sealI; i <= endI; i++) { t[i - sealI] = bars.t[i]; r[i - sealI] = res.ret[i]; }
+    streams.push({ t, ret: r });
+    for (const tr of res.trades) if (tr.entryI >= sealI) trades++;
   }
-  const curve = downsampleCurve(bars.t, sealedEq, sealI, endI, 150);
-  for (const tr of res.trades) if (tr.entryI >= sealI) trades++;
-  const n = Math.max(1, endI - sealI + 1);
-  const mean = s / n, sd = Math.sqrt(Math.max(0, sq / n - mean * mean));
-  const sharpe = sd > 1e-12 ? (mean / sd) * Math.sqrt(opts.ppy) : 0;
-  const ret = g - 1;
-  if (trades < floors.sealedMinTrades) return { passed: false, reason: `${trades} sealed trades < ${floors.sealedMinTrades}`, sharpe, ret, maxDD: dd, trades, curve };
-  if (sharpe < floors.sealedMinSharpe) return { passed: false, reason: `sealed sharpe ${sharpe.toFixed(2)} < ${floors.sealedMinSharpe}`, sharpe, ret, maxDD: dd, trades, curve };
-  if (ret <= 0) return { passed: false, reason: `sealed return ${(ret * 100).toFixed(1)}% <= 0`, sharpe, ret, maxDD: dd, trades, curve };
-  if (dd < floors.sealedMaxDD) return { passed: false, reason: `sealed maxDD ${(dd * 100).toFixed(0)}%`, sharpe, ret, maxDD: dd, trades, curve };
-  return { passed: true, sharpe, ret, maxDD: dd, trades, curve };
+  if (!streams.length) return { passed: false, reason: "no sealed data", sharpe: 0, ret: 0, maxDD: 0, cagr: 0, trades: 0, curve: { t: [], eq: [] } };
+  const port = mergePortfolio(streams);
+  const ps = seriesStats(port.ret, port.t, ppy);
+  const curve = downsampleCurve(port.t, ps.equity, 0, port.t.length - 1, 150);
+  const base = { sharpe: ps.sharpe, ret: ps.totalRet, maxDD: ps.maxDD, cagr: ps.cagr, trades, curve };
+  if (trades < floors.sealedMinTrades) return { passed: false, reason: `${trades} sealed trades < ${floors.sealedMinTrades}`, ...base };
+  if (ps.sharpe < floors.sealedMinSharpe) return { passed: false, reason: `sealed portfolio sharpe ${ps.sharpe.toFixed(2)} < ${floors.sealedMinSharpe}`, ...base };
+  if (ps.totalRet <= 0) return { passed: false, reason: `sealed return ${(ps.totalRet * 100).toFixed(1)}% <= 0`, ...base };
+  if (ps.maxDD < floors.sealedMaxDD) return { passed: false, reason: `sealed maxDD ${(ps.maxDD * 100).toFixed(0)}%`, ...base };
+  return { passed: true, ...base };
 }
 
 function summarizeWf(wf: WfReport) {

@@ -20,6 +20,7 @@ export interface WfReport {
   worstWindowRet: number;
   pooledMaxDD: number;
   pooledRet: Float64Array; // concatenated OOS returns (for stats downstream)
+  pooledT: Float64Array;   // bar timestamps aligned with pooledRet (for portfolio assembly)
   totalOosTrades: number;
 }
 
@@ -38,6 +39,7 @@ export function walkForward(
 
   const windows: WfWindow[] = [];
   const pooled: number[] = [];
+  const pooledTs: number[] = [];
   let totalOosTrades = 0;
 
   let testStart = startTs + trainMs;
@@ -60,7 +62,7 @@ export function walkForward(
     const mean = s / n, sd = Math.sqrt(Math.max(0, sq / n - mean * mean));
     const oosSharpe = sd > 1e-12 ? (mean / sd) * Math.sqrt(opts.ppy) : 0;
     windows.push({ trainStartTs: bars.t[trainStartI], testStartTs: testStart, testEndTs, params: fit.params, oosSharpe, oosRet: g - 1, oosTrades: trades });
-    for (let i = testStartI; i <= testEndI; i++) pooled.push(res.ret[i]);
+    for (let i = testStartI; i <= testEndI; i++) { pooled.push(res.ret[i]); pooledTs.push(bars.t[i]); }
     totalOosTrades += trades;
     testStart += stepMs;
     wi++;
@@ -83,6 +85,7 @@ export function walkForward(
     worstWindowRet: windows.length ? Math.min(...windows.map((w) => w.oosRet)) : 0,
     pooledMaxDD: maxDD,
     pooledRet,
+    pooledT: Float64Array.from(pooledTs),
     totalOosTrades,
   };
 }
