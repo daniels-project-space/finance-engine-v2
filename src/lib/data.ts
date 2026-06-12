@@ -1,5 +1,15 @@
 // Candle store: R2-backed columnar bars with gap validation and incremental append.
-import { fetchFunding, fetchKlines } from "./binance";
+//
+// Provider strategy (probed 2026-06-12 from US cloud, where Trigger workers run):
+//   - Binance live API: 451 geo-blocked. Bybit: 403 geo-blocked.
+//   - data.binance.vision (archive CDN): open -> BULK BACKFILL (exact Binance
+//     USDT-M perp klines + funding, complete months)
+//   - OKX public API: open -> LIVE TAIL (perp candles + funding)
+// Splicing Binance history with an OKX tail costs a few bps of cross-venue
+// basis at the boundary — immaterial at 1h with 7bps/side modeled costs.
+
+import { okxFunding, okxKlines } from "./okx";
+import { visionFunding, visionKlines } from "./vision";
 import { candleKey, getJsonGz, putJsonGz } from "./storage";
 import type { Bars } from "../engine/types";
 
@@ -14,7 +24,12 @@ export interface IngestResult {
   firstTs: number; lastTs: number; fundingLastTs?: number; source: string;
 }
 
-/** Fetch/refresh bars from `sinceTs` (or extend existing), validate, store to R2. */
+function startOfCurrentMonth(now: number): number {
+  const d = new Date(now);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+}
+
+/** Fetch/refresh bars from history start (or extend existing), validate, store to R2. */
 export async function ingestSymbol(
   symbol: string, tf: string, historyStartTs: number, log?: (m: string) => void,
 ): Promise<IngestResult> {
@@ -26,26 +41,52 @@ export async function ingestSymbol(
   const from = existing && existing.t.length ? existing.t[existing.t.length - 1] + tfMs : historyStartTs;
 
   let appended = 0;
-  let source = "cache";
+  const sources: string[] = [];
   const bars: Bars = existing ?? { symbol, tf, t: [], o: [], h: [], l: [], c: [], v: [], fundingT: [], fundingR: [] };
+  const push = (r: { t: number; o: number; h: number; l: number; c: number; v: number }) => {
+    if (r.t > lastClosedOpen) return;
+    if (bars.t.length && r.t <= bars.t[bars.t.length - 1]) return;
+    bars.t.push(r.t); bars.o.push(r.o); bars.h.push(r.h); bars.l.push(r.l); bars.c.push(r.c); bars.v.push(r.v);
+    appended++;
+  };
 
   if (from <= lastClosedOpen) {
-    const { rows, source: src } = await fetchKlines(symbol, tf, from, lastClosedOpen + tfMs, log);
-    source = src;
-    for (const r of rows) {
-      if (r.t > lastClosedOpen) continue; // skip the still-open bar
-      if (bars.t.length && r.t <= bars.t[bars.t.length - 1]) continue;
-      bars.t.push(r.t); bars.o.push(r.o); bars.h.push(r.h); bars.l.push(r.l); bars.c.push(r.c); bars.v.push(r.v);
-      appended++;
+    // bulk backfill from the archive for complete months
+    const visionEnd = startOfCurrentMonth(now) - 1;
+    if (visionEnd - from > 50 * tfMs) {
+      const rows = await visionKlines(symbol, tf, from, visionEnd, log);
+      for (const r of rows) push(r);
+      if (rows.length) sources.push("vision");
+    }
+    // live tail from OKX
+    const tailFrom = bars.t.length ? bars.t[bars.t.length - 1] + tfMs : from;
+    if (tailFrom <= lastClosedOpen) {
+      const rows = await okxKlines(symbol, tf, tailFrom, lastClosedOpen + tfMs - 1, log);
+      for (const r of rows) push(r);
+      if (rows.length) sources.push("okx");
     }
   }
 
-  // funding (perp only; harmless empty on spot fallback)
+  // funding: archive for complete months, OKX for the tail
   bars.fundingT = bars.fundingT ?? []; bars.fundingR = bars.fundingR ?? [];
   const fFrom = bars.fundingT.length ? bars.fundingT[bars.fundingT.length - 1] + 1 : historyStartTs;
   if (fFrom < now) {
-    const f = await fetchFunding(symbol, fFrom, now, log);
-    for (let i = 0; i < f.t.length; i++) { bars.fundingT.push(f.t[i]); bars.fundingR.push(f.r[i]); }
+    const visionEnd = startOfCurrentMonth(now) - 1;
+    if (visionEnd - fFrom > 86_400_000 * 3) {
+      const f = await visionFunding(symbol, fFrom, visionEnd, log);
+      for (let i = 0; i < f.t.length; i++) {
+        if (!bars.fundingT.length || f.t[i] > bars.fundingT[bars.fundingT.length - 1]) {
+          bars.fundingT.push(f.t[i]); bars.fundingR.push(f.r[i]);
+        }
+      }
+    }
+    const fTail = bars.fundingT.length ? bars.fundingT[bars.fundingT.length - 1] + 1 : fFrom;
+    const f2 = await okxFunding(symbol, fTail, now, log);
+    for (let i = 0; i < f2.t.length; i++) {
+      if (!bars.fundingT.length || f2.t[i] > bars.fundingT[bars.fundingT.length - 1]) {
+        bars.fundingT.push(f2.t[i]); bars.fundingR.push(f2.r[i]);
+      }
+    }
   }
 
   // validation: count gaps + flag outliers
@@ -61,7 +102,7 @@ export async function ingestSymbol(
     symbol, tf, bars: bars.t.length, appended, gaps,
     firstTs: bars.t[0] ?? 0, lastTs: bars.t[bars.t.length - 1] ?? 0,
     fundingLastTs: bars.fundingT.length ? bars.fundingT[bars.fundingT.length - 1] : undefined,
-    source,
+    source: sources.join("+") || "cache",
   };
 }
 
@@ -80,7 +121,6 @@ export function aggregateBars(src: Bars, targetTf: "4h" | "1d"): Bars {
       h = Math.max(h, src.h[j]); l = Math.min(l, src.l[j]); c = src.c[j]; v += src.v[j];
       j++;
     }
-    // only emit complete buckets
     if (j < src.t.length || src.t[i] + targetMs <= src.t[src.t.length - 1] + tfMs) {
       out.t.push(bucketStart); out.o.push(o); out.h.push(h); out.l.push(l); out.c.push(c); out.v.push(v);
     }
