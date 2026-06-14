@@ -185,7 +185,44 @@ const OP_SWAPS: Record<string, string[]> = {
 /** Steer the operator distribution by the parent's cause of death. */
 export type MutationHint = "risk" | "consistency" | "generalize" | "sharpe" | undefined;
 
-export function mutateStrategy(parent: StrategyDoc, seed: number, hint?: MutationHint): { doc: StrategyDoc; mutation: string } {
+// The base mutation-operator families the bandit chooses among. Keys match the
+// "gp-op:<op>" recipe keys in the knowledge ledger (without the prefix here).
+export const MUTATION_OPS = [
+  "op_swap", "param_shift", "add_filter", "remove_filter", "new_exit", "toggle_shorts", "risk_overlay",
+] as const;
+export type MutationOp = typeof MUTATION_OPS[number];
+
+// Map a chosen operator family onto a `kind` value in the legacy threshold
+// ladder, so the existing branch logic runs unchanged.
+const OP_KIND: Record<MutationOp, number> = {
+  op_swap: 0.1, param_shift: 0.3, add_filter: 0.47, remove_filter: 0.6, new_exit: 0.72, toggle_shorts: 0.83, risk_overlay: 0.95,
+};
+
+export interface BanditOpts {
+  /** chosen operator family (recipe), or "" to use the legacy uniform ladder */
+  forcedOp?: MutationOp | "";
+}
+
+/** Map a mutation string (returned by mutateStrategy) onto its recipe key for ledger attribution. */
+export function recipeOf(source: string, mutation?: string): string {
+  if (source === "crossover") return "crossover";
+  if (source === "gp") return "fresh";
+  if (source === "llm") return "llm";
+  if (source === "seed") return "seed";
+  if (source === "imported") return "imported";
+  const m = mutation ?? "";
+  if (m.startsWith("repair_")) return `gp-op:${m.split(":")[0]}`;        // repair_tighten_stop, repair_slow:p2 -> gp-op:repair_*
+  if (m.startsWith("op_swap")) return "gp-op:op_swap";
+  if (m.startsWith("param_shift")) return "gp-op:param_shift";
+  if (m === "add_filter") return "gp-op:add_filter";
+  if (m === "remove_filter") return "gp-op:remove_filter";
+  if (m === "new_exit") return "gp-op:new_exit";
+  if (m === "drop_shorts" || m === "add_shorts") return "gp-op:toggle_shorts";
+  if (m.startsWith("toggle_") || m.startsWith("leverage_") || m.startsWith("tf_shift")) return "gp-op:risk_overlay";
+  return "gp-op:other";
+}
+
+export function mutateStrategy(parent: StrategyDoc, seed: number, hint?: MutationHint, bandit?: BanditOpts): { doc: StrategyDoc; mutation: string } {
   const rng = mulberry32(seed);
   for (let attempt = 0; attempt < 12; attempt++) {
     const doc = clone(parent);
@@ -258,7 +295,9 @@ export function mutateStrategy(parent: StrategyDoc, seed: number, hint?: Mutatio
       }
     }
 
-    const kind = rng();
+    // bandit-driven operator choice: when a recipe is forced, snap `kind` to
+    // that family's bucket; otherwise keep the legacy uniform ladder.
+    const kind = bandit?.forcedOp ? OP_KIND[bandit.forcedOp] : rng();
     try {
       if (kind < 0.2) {
         // op swap somewhere

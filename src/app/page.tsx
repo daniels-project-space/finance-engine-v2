@@ -200,7 +200,7 @@ export default function Overview() {
         <span className="num text-xs text-dim">LLM today <span className="text-fg">${((llmSpend ?? 0) / 100).toFixed(2)}</span></span>
         <span className="num text-xs text-dim">data <span className={Date.now() - dataFresh < 2.5 * 3600_000 ? "text-up" : "text-down"}>{dataFresh ? timeAgo(dataFresh) : "·"}</span></span>
         <span className="num text-xs text-dim">universe <span className="text-fg">{datasets ? new Set(datasets.map((d) => d.symbol)).size : "·"} pairs × {datasets ? new Set(datasets.map((d) => d.tf)).size : "·"} tf</span></span>
-        <span className="num text-xs text-dim ml-auto">evolve :20/3h · fable :50/3h · paper :12 · monitor 07:00 UTC</span>
+        <span className="num text-xs text-dim ml-auto">evolve :20/3h · ideate :50/3h · paper :12 · monitor 07:00 UTC</span>
       </section>
     </div>
   );

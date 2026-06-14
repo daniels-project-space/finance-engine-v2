@@ -1,7 +1,7 @@
 // Strategies imported from published, citable sources — rules translated
 // faithfully into the DSL, source URL in every hypothesis. They get no
 // special treatment: same gauntlet, same floors. If they out-rank the
-// home-grown pool, the breeder and Fable inherit them automatically
+// home-grown pool, the breeder and the Opus lane inherit them automatically
 // (parents come from the tournament board; lessons cite their mechanisms).
 
 import type { Expr, ParamSpec, StrategyDoc } from "./types";

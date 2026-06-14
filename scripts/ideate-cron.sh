@@ -1,5 +1,5 @@
 #!/bin/bash
-# Fable ideation via owner-authenticated Claude Code CLI (Max plan, personal use).
+# Opus ideation via owner-authenticated Claude Code CLI (Max plan, personal use).
 exec 9>/tmp/fev2-ideate.lock
 flock -n 9 || exit 0
 source /root/.fev2-env

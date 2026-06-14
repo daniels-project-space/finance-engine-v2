@@ -5,6 +5,7 @@ export const create = mutation({
   args: {
     name: v.string(), source: v.string(), parentIds: v.optional(v.array(v.string())),
     dsl: v.string(), hash: v.string(), familyHash: v.string(), hypothesis: v.string(),
+    mechanism: v.optional(v.string()),   // intelligence upgrade: recipe key (bandit attribution)
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db.query("candidates").withIndex("by_hash", (q) => q.eq("hash", args.hash)).first();
@@ -32,6 +33,12 @@ export const updateStage = mutation({
 export const get = query({
   args: { id: v.id("candidates") },
   handler: (ctx, { id }) => ctx.db.get(id),
+});
+
+// intelligence upgrade: persist a candidate's surprise (actual - expected).
+export const setSurprise = mutation({
+  args: { id: v.id("candidates"), surprise: v.number() },
+  handler: (ctx, { id, surprise }) => ctx.db.patch(id, { surprise, updatedAt: Date.now() }),
 });
 
 export const listByStage = query({

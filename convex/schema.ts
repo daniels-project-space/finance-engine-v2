@@ -21,6 +21,8 @@ export default defineSchema({
     curves: v.optional(v.string()),       // JSON {full,wf,sealed} downsampled equity paths
     composite: v.optional(v.number()),
     incubationStartedAt: v.optional(v.number()),
+    mechanism: v.optional(v.string()),    // intelligence upgrade: recipe key that produced this candidate
+    surprise: v.optional(v.number()),     // actual composite - expected (recipe mean) at evaluation
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -148,4 +150,53 @@ export default defineSchema({
     key: v.string(),
     json: v.string(),
   }).index("by_key", ["key"]),
+
+  // ---- intelligence upgrade (ADDITIVE) ----
+  // Per-recipe outcome rollup — the bandit's prior, read once per cycle.
+  // family is undefined for the global rows the bandit samples from (a slot is
+  // reserved for future per-family rows). alpha/beta are Beta pseudo-counts for
+  // the "reached >= S3" success signal; the bandit also folds in a runtime
+  // suppression scalar from the penalty graveyard.
+  mechanismStats: defineTable({
+    mechanism: v.string(),          // recipe key: "gp-op:<op>" | "crossover" | "fresh" | "llm" | "seed" | "imported"
+    family: v.optional(v.string()), // familyHash, or undefined for global rows
+    attempts: v.number(),
+    alpha: v.number(),              // 1 + successes (reached >= S3)
+    beta: v.number(),               // 1 + failures
+    promotions: v.number(),
+    compositeSum: v.number(),       // running sum of composite (mean = sum/N)
+    compositeN: v.number(),
+    failedSealed: v.number(),       // died at S6-sealed (overfit signal)
+    failedS4: v.number(),           // died cross-symbol/portfolio
+    surpriseSum: v.number(),
+    surpriseN: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_key", ["mechanism", "family"])
+    .index("by_family", ["family"])
+    .index("by_mechanism", ["mechanism"]),
+
+  // Per-candidate provenance so completion can attribute outcomes back to a
+  // recipe and compute surprise = actual composite - expectedComposite.
+  candidateProvenance: defineTable({
+    candidateId: v.id("candidates"),
+    mechanism: v.string(),
+    family: v.string(),
+    parentComposite: v.optional(v.number()),
+    expectedComposite: v.optional(v.number()),
+    wild: v.boolean(),              // injected exploratory (anti-Thompson / epsilon) mutation?
+    createdAt: v.number(),
+  }).index("by_candidate", ["candidateId"]),
+
+  // Surprise events (actual >> expected on a recipe) — fed into lessons + logged.
+  surpriseLog: defineTable({
+    candidateId: v.id("candidates"),
+    mechanism: v.string(),
+    expected: v.number(),
+    actual: v.number(),
+    surprise: v.number(),
+    wild: v.boolean(),
+    reachedStage: v.string(),
+    createdAt: v.number(),
+  }).index("by_createdAt", ["createdAt"]),
 });

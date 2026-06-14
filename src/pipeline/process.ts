@@ -8,11 +8,13 @@ import { mergeConfig, todayKey, type AppConfig } from "../lib/appConfig";
 import { loadBars } from "../lib/data";
 import { artifactKey, putJsonGz } from "../lib/storage";
 import { canonicalHash, familyHash, validateStrategy } from "../engine/dsl";
-import { crossoverStrategies, mutateStrategy, randomStrategy, type MutationHint } from "../engine/evolve";
+import { crossoverStrategies, mutateStrategy, randomStrategy, recipeOf, MUTATION_OPS, type MutationHint, type MutationOp } from "../engine/evolve";
 import { SEED_LIBRARY } from "../engine/library";
 import { IMPORTED_LIBRARY } from "../engine/imports";
 import { evaluateSealed, runGauntlet } from "../engine/gauntlet";
 import { propose } from "../engine/llm";
+import { thompsonPick, antiThompsonPick, type Arm } from "../engine/bandit";
+import { mulberry32 } from "../engine/stats";
 import { PPY, type Bars, type StrategyDoc } from "../engine/types";
 
 export type Log = (m: string) => void;
@@ -65,68 +67,139 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
         }
       } catch { /* keep defaults */ }
     }
-    return { doc, id: c._id as string, hint: hintFor(c.failedReason) };
+    return { doc, id: c._id as string, hint: hintFor(c.failedReason), composite: c.composite ?? 0, family: c.familyHash };
   });
 
+  // ---- intelligence upgrade: learned (Thompson) selection ----
+  // Knowledge ledger read once per cycle. Empty => cold-start => uniform behavior.
+  const ledger = await cx.query(api.ledger.ledgerSnapshot, {});
+  const ledgerByMech = new Map(ledger.map((r) => [r.mechanism, r]));
+  // Soft dead-end suppression from the failure memory: a recipe that keeps
+  // dying at the sealed holdout / cross-symbol stage gets its Beta failure
+  // param inflated (collapses its odds without zeroing them).
+  const recipeArms: Arm[] = MUTATION_OPS.map((op) => {
+    const key = `gp-op:${op}`;
+    const r = ledgerByMech.get(key);
+    const suppression = r ? 2 * r.failedSealed + r.failedS4 : 0;
+    return { key, alpha: r?.alpha ?? 1, beta: r?.beta ?? 1, suppression };
+  });
+  const epsilon = Number(process.env.EVOLUTION_EPSILON ?? 0.15);
+  const banditRng = mulberry32(((await cx.query(api.pipeline.getCounter, { key: "trials_total" })) || 1) * 2654435761 >>> 0);
+  const ledgerMean = (mech: string) => {
+    const r = ledgerByMech.get(mech);
+    return r && r.meanComposite ? r.meanComposite : 0;
+  };
+  // global mean composite across all recipes (fresh/llm expected baseline)
+  const globalMean = ledger.length
+    ? ledger.reduce((s, r) => s + (r.meanComposite || 0) * r.compositeN, 0) / Math.max(1, ledger.reduce((s, r) => s + r.compositeN, 0))
+    : 0;
+  // fitness-proportional parent picker, weighted by composite (floored)
+  const parentWeights = parents.map((p) => Math.max(0.05, p.composite));
+  const parentWeightSum = parentWeights.reduce((a, b) => a + b, 0);
+  const pickParent = (): typeof parents[number] => {
+    if (!parents.length) return parents[0];
+    let r = banditRng() * parentWeightSum;
+    for (let k = 0; k < parents.length; k++) { r -= parentWeights[k]; if (r <= 0) return parents[k]; }
+    return parents[parents.length - 1];
+  };
+
   const seedBase = (await cx.mutation(api.pipeline.bumpCounter, { key: "seed", by: 1 })) * 7919;
-  const proposals: { doc: StrategyDoc; source: string; parentIds?: string[] }[] = [];
+  type Proposal = { doc: StrategyDoc; source: string; parentIds?: string[]; mechanism?: string; parentComposite?: number; expectedComposite?: number; wild?: boolean };
+  const proposals: Proposal[] = [];
 
   // Library backfill: any research-backed seed or imported published strategy
   // not yet registered goes first. The founders anchor the ranking.
   for (const seedDoc of SEED_LIBRARY) {
     const hash = canonicalHash(seedDoc);
     if (!(await cx.query(api.candidates.hashExists, { hash }))) {
-      proposals.push({ doc: seedDoc, source: "seed" });
+      proposals.push({ doc: seedDoc, source: "seed", mechanism: "seed" });
     }
   }
   for (const impDoc of IMPORTED_LIBRARY) {
     const hash = canonicalHash(impDoc);
     if (!(await cx.query(api.candidates.hashExists, { hash }))) {
-      proposals.push({ doc: impDoc, source: "imported" });
+      proposals.push({ doc: impDoc, source: "imported", mechanism: "imported" });
     }
   }
 
   const gpN = Math.round(cfg.evo.batchGp * scale);
+  // force ~10% of GP children to be deliberately WILD (anti-Thompson recipe) so
+  // exploration never collapses even when one operator dominates the ledger.
+  const wildQuota = ledger.length ? Math.max(1, Math.round(0.1 * gpN)) : 0;
+  let wildUsed = 0;
   for (let i = 0; i < gpN && parents.length > 0; i++) {
     const seed = seedBase + i;
     if (parents.length >= 2 && i % 4 === 3) {
-      const a = parents[i % parents.length], b = parents[(i + 1) % parents.length];
-      proposals.push({ doc: crossoverStrategies(a.doc, b.doc, seed), source: "crossover", parentIds: [a.id, b.id] });
+      const a = pickParent(), b = pickParent();
+      proposals.push({
+        doc: crossoverStrategies(a.doc, b.doc, seed), source: "crossover", parentIds: [a.id, b.id],
+        mechanism: "crossover", parentComposite: Math.max(a.composite, b.composite),
+        expectedComposite: ledgerMean("crossover") || Math.max(a.composite, b.composite) * 0.9, wild: false,
+      });
     } else {
-      const p = parents[i % parents.length];
-      const { doc, mutation } = mutateStrategy(p.doc, seed, p.hint);
-      proposals.push({ doc, source: mutation.startsWith("repair_") ? "repair" : "mutation", parentIds: [p.id] });
+      const p = pickParent();
+      // bandit recipe: deliberate wild pick for the quota, else Thompson sample
+      let forcedOp: MutationOp | "" = "";
+      let wild = false;
+      if (recipeArms.length && wildUsed < wildQuota && banditRng() < 0.34) {
+        const anti = antiThompsonPick(recipeArms);
+        forcedOp = (anti.replace("gp-op:", "") as MutationOp);
+        wild = true; wildUsed++;
+      } else if (recipeArms.length) {
+        const pick = thompsonPick(recipeArms, banditRng, epsilon);
+        if (pick.key) forcedOp = pick.key.replace("gp-op:", "") as MutationOp;
+        wild = pick.wild;
+      }
+      const { doc, mutation } = mutateStrategy(p.doc, seed, p.hint, { forcedOp });
+      const mechanism = recipeOf(mutation.startsWith("repair_") ? "repair" : "mutation", mutation);
+      const expected = (ledgerMean(mechanism) || p.composite * 0.9);
+      proposals.push({
+        doc, source: mutation.startsWith("repair_") ? "repair" : "mutation", parentIds: [p.id],
+        mechanism, parentComposite: p.composite, expectedComposite: expected, wild,
+      });
     }
     summary.gp++;
   }
 
   const freshN = Math.round((parents.length === 0 ? cfg.evo.batchGp + cfg.evo.batchFresh : cfg.evo.batchFresh) * scale);
   for (let i = 0; i < freshN; i++) {
-    proposals.push({ doc: randomStrategy(seedBase + 100_000 + i), source: "gp" });
+    proposals.push({ doc: randomStrategy(seedBase + 100_000 + i), source: "gp", mechanism: "fresh", expectedComposite: globalMean, wild: false });
     summary.fresh++;
   }
 
-  // LLM lane (budget-gated; Fable -> DeepSeek fallback)
+  // LLM lane. Anthropic goes through the subscription Claude CLI (NO API key),
+  // which now runs in BOTH the VPS and the Trigger cloud image (the claude bin
+  // is baked in and authed from the injected CLAUDE_CODE_OAUTH_TOKEN). On any CLI
+  // failure propose() falls back to DeepSeek (a non-Anthropic backup). The
+  // flat-rate subscription is treated as free for the budget gate; the per-token
+  // figure is logged as a metric only. EVOLUTION_DISABLE_CLI is an optional local
+  // override (default unset => CLI enabled).
   const spentCents = await cx.query(api.pipeline.getCounter, { key: todayKey("llm_usd_cents") });
   const budgetLeft = cfg.llmDailyBudgetUsd - spentCents / 100;
-  if (budgetLeft > 0.05) {
+  const allowCli = process.env.EVOLUTION_DISABLE_CLI !== "1";
+  if (budgetLeft > 0.05 || allowCli) {
     const lessons = (await cx.query(api.pipeline.recentLessons, { limit: 25 })).map((l) => l.text);
     const championSummary = champion
       ? `"${champion.name}" composite=${champion.composite?.toFixed(2)} hypothesis: ${champion.hypothesis}`
       : "none yet";
     const result = await propose(
-      { anthropic: process.env.ANTHROPIC_API_KEY, openrouter: process.env.OPENROUTER_API_KEY },
+      { openrouter: process.env.OPENROUTER_API_KEY },
       budgetLeft, lessons, "", championSummary, cfg.evo.batchLlm,
+      { allowClaudeCli: allowCli },
     );
     if ("skipped" in result) summary.llmSkipped = result.skipped;
     else {
-      await cx.mutation(api.pipeline.bumpCounter, { key: todayKey("llm_usd_cents"), by: Math.ceil(result.usage.costUsd * 100) });
+      // subscription CLI is flat-rate: only the (billed) OpenRouter fallback
+      // should consume the USD budget counter.
+      if (result.usage.provider === "openrouter") {
+        await cx.mutation(api.pipeline.bumpCounter, { key: todayKey("llm_usd_cents"), by: Math.ceil(result.usage.costUsd * 100) });
+      }
       for (const p of result.proposals) {
         p.doc.hypothesis = `${p.doc.hypothesis} [LLM: ${result.usage.model}] ${p.rationale.slice(0, 100)}`;
-        proposals.push({ doc: p.doc, source: "llm" });
+        proposals.push({ doc: p.doc, source: "llm", mechanism: "llm", expectedComposite: globalMean, wild: false });
         summary.llm++;
       }
-      log(`LLM ${result.usage.model}: ${result.proposals.length} proposals, $${result.usage.costUsd.toFixed(3)}`);
+      log(`LLM ${result.usage.provider}/${result.usage.model}: ${result.proposals.length} proposals (metric $${result.usage.costUsd.toFixed(3)})`);
     }
   } else summary.llmSkipped = "daily budget exhausted";
 
@@ -138,12 +211,21 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
     const fam = familyHash(p.doc);
     const famCount = await cx.query(api.candidates.familySeenCount, { familyHash: fam });
     if (famCount >= 10) { summary.duplicates++; continue; }
+    const mechanism = p.mechanism ?? "fresh";
     const { id, duplicate } = await cx.mutation(api.candidates.create, {
       name: p.doc.name, source: p.source, parentIds: p.parentIds,
-      dsl: JSON.stringify(p.doc), hash, familyHash: fam, hypothesis: p.doc.hypothesis,
+      dsl: JSON.stringify(p.doc), hash, familyHash: fam, hypothesis: p.doc.hypothesis, mechanism,
     });
     if (duplicate) { summary.duplicates++; continue; }
     await cx.mutation(api.candidates.updateStage, { id, stage: "queued" });
+    // provenance + ledger attempt bump (the bandit's prior). Best-effort: a
+    // ledger hiccup must never break candidate generation.
+    try {
+      await cx.mutation(api.ledger.recordProvenance, {
+        candidateId: id as Id<"candidates">, mechanism, family: fam,
+        parentComposite: p.parentComposite, expectedComposite: p.expectedComposite, wild: !!p.wild,
+      });
+    } catch (e) { log(`ledger provenance skipped: ${e instanceof Error ? e.message.slice(0, 80) : e}`); }
     await cx.mutation(api.pipeline.bumpCounter, { key: todayKey("candidates"), by: 1 });
     summary.ids.push(id as unknown as string);
     summary.queued++;
@@ -162,10 +244,44 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   const doc = JSON.parse(cand.dsl) as StrategyDoc;
   const sealTs = Date.parse(cfg.sealDate);
 
+  // intelligence upgrade: at every terminal point, attribute the outcome back
+  // to the recipe (updates the bandit's Beta posteriors + ledger means) and,
+  // when a candidate beats its recipe's expectation, log a SURPRISE lesson so
+  // the discovery feeds the LLM prompt next cycle. Best-effort — a ledger
+  // hiccup must never break the gauntlet.
+  const SURPRISE_THRESHOLD = Number(process.env.EVOLUTION_SURPRISE ?? 0.25);
+  const finalizeLedger = async (reachedStage: string, composite?: number, promoted = false) => {
+    try {
+      const res = await cx.mutation(api.ledger.recordOutcome, { candidateId, reachedStage, composite, promoted }) as
+        { surprise: number | null; mechanism?: string; wild?: boolean } | null;
+      const surprise = res?.surprise ?? null;
+      const mech = res?.mechanism ?? cand.mechanism ?? "unknown";
+      const wild = res?.wild ?? false;
+      if (surprise !== null && composite !== undefined) {
+        await cx.mutation(api.candidates.setSurprise, { id: candidateId, surprise });
+        await cx.mutation(api.pipeline.bumpCounter, { key: todayKey("surprise_n"), by: 1 });
+        // surprise gating: a recipe must have a few attempts before a "beat"
+        // counts (avoids first-win noise), and the margin must clear the bar.
+        const attempts = (await cx.query(api.ledger.mechanismMean, { mechanism: mech })).attempts;
+        if (surprise >= SURPRISE_THRESHOLD && attempts >= 3) {
+          await cx.mutation(api.pipeline.bumpCounter, { key: todayKey("surprise_hits"), by: 1 });
+          await cx.mutation(api.ledger.recordSurprise, {
+            candidateId, mechanism: mech, expected: composite - surprise, actual: composite, surprise, wild, reachedStage,
+          });
+          await cx.mutation(api.pipeline.addLesson, {
+            source: cand.source, candidateId, stage: reachedStage,
+            text: `SURPRISE +${surprise.toFixed(2)}: ${wild ? "wild " : ""}recipe "${mech}" beat its expectation (composite ${composite.toFixed(2)}) reaching ${reachedStage} — ${cand.hypothesis.slice(0, 90)}`,
+          });
+        }
+      }
+    } catch (e) { log(`ledger finalize skipped: ${e instanceof Error ? e.message.slice(0, 80) : e}`); }
+  };
+
   await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "gauntlet" });
 
   if (await cx.query(api.pipeline.isPenalized, { familyHash: cand.familyHash })) {
     await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: "S1-penalty", failedReason: "family in penalty box" });
+    await finalizeLedger("S1-penalty");
     return { passed: false, stage: "S1-penalty" };
   }
 
@@ -219,6 +335,7 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
       await cx.mutation(api.pipeline.penalize, { familyHash: cand.familyHash, reason: `family failed ${familySeen}x`, days: 7 });
     }
     log(`FAILED at ${report.failedStage}: ${report.failedReason}`);
+    await finalizeLedger(report.failedStage ?? "failed", partial);
     return { passed: false, stage: report.failedStage };
   }
 
@@ -226,6 +343,7 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   const claim = await cx.mutation(api.pipeline.claimHoldout, { hash: cand.hash, sealTs });
   if (!claim.allowed) {
     await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: "S6-sealed", failedReason: "seal already consumed for this hash" });
+    await finalizeLedger("S6-sealed");
     return { passed: false, stage: "S6-sealed" };
   }
   const sameTf = [primary, ...others.filter((b) => b.tf === primary.tf)];
@@ -250,6 +368,7 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
       text: `SEALED-FAIL: "${cand.name}" passed S0–S5b then failed the sealed holdout (${sealed.reason}). In-sample machinery is fitting noise in this family.`,
     });
     await cx.mutation(api.pipeline.penalize, { familyHash: cand.familyHash, reason: "sealed holdout fail", days: 14 });
+    await finalizeLedger("S6-sealed", composite);
     return { passed: false, stage: "S6-sealed" };
   }
 
@@ -273,5 +392,6 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
     `${cand.hypothesis.slice(0, 160)}`,
   );
   log(`PASSED -> incubating, composite=${composite.toFixed(2)}`);
+  await finalizeLedger("incubating", composite);
   return { passed: true, composite };
 }

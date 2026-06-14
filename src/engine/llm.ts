@@ -1,12 +1,29 @@
-// LLM ideation layer. Primary: Claude Fable 5 (Anthropic SDK, structured
-// output via output_config JSON schema). Fallback: DeepSeek via OpenRouter
-// (provider-pinned — SiliconFlow fp8 corrupts JSON). Both produce StrategyDoc
-// proposals validated by the DSL before they touch the pipeline.
-// Budget enforcement (USD/day) is the caller's job via the Convex counters.
+// LLM ideation layer.
+//
+// AUTH POLICY (hard rule): Anthropic ideation runs through the locally
+// authenticated Claude Code CLI on Daniel's Max SUBSCRIPTION — `claude -p
+// --model <id> --output-format json`, reading the OAuth credentials at
+// ~/.claude/.credentials.json (auto-refreshed). There is NO @anthropic-ai/sdk
+// / ANTHROPIC_API_KEY path anywhere: the loop must never bill console credits.
+// This path runs BOTH on the VPS (local cron) AND in the Trigger.dev cloud
+// worker: @anthropic-ai/claude-code is baked into the deploy image and authed
+// from the injected CLAUDE_CODE_OAUTH_TOKEN. DeepSeek (OpenRouter) is the only
+// fallback, used solely when the CLI errors — a NON-Anthropic backup, allowed.
+//
+// Both producers yield StrategyDoc proposals validated by the DSL before they
+// touch the pipeline. Budget is the caller's job via the Convex counters; the
+// subscription CLI is flat-rate, so its USD "cost" is a logged metric, not a
+// charge.
 
-import Anthropic from "@anthropic-ai/sdk";
+import { execFile } from "node:child_process";
+import { mkdirSync, existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { validateStrategy } from "./dsl";
+import { EVOLUTION_MODEL, priceFor } from "./model";
 import type { StrategyDoc } from "./types";
+
+const require = createRequire(import.meta.url);
 
 export interface LlmProposal {
   doc: StrategyDoc;
@@ -14,14 +31,17 @@ export interface LlmProposal {
 }
 
 export interface LlmUsage {
-  provider: "anthropic" | "openrouter";
+  provider: "anthropic-cli" | "openrouter";
   model: string;
   inputTokens: number;
   outputTokens: number;
   costUsd: number;
 }
 
-const FABLE_IN_PER_M = 10, FABLE_OUT_PER_M = 50;
+// How long to allow the (Opus) CLI call to run. Opus on a 1M-context ideation
+// prompt at default effort can take minutes — generous so latency never aborts
+// a valid call. Override with EVOLUTION_LLM_TIMEOUT_MS.
+const CLI_TIMEOUT_MS = Number(process.env.EVOLUTION_LLM_TIMEOUT_MS ?? 12 * 60 * 1000);
 
 const DSL_GUIDE = `You design crypto perp trading strategies as JSON expression graphs ("DSL"). NO code — pure JSON.
 
@@ -109,37 +129,94 @@ export function parseProposals(raw: string): LlmProposal[] {
   return out;
 }
 
-export async function proposeWithFable(
-  apiKey: string,
+// ---------------------------------------------------------------- Claude CLI
+interface ClaudeCliJson {
+  is_error?: boolean;
+  subtype?: string;
+  result?: string;
+  usage?: { input_tokens?: number; output_tokens?: number };
+}
+
+/**
+ * Resolve the absolute path to the claude binary. In the Trigger cloud image the
+ * package is installed into the image node_modules (additionalPackages) but the
+ *  bin is NOT on PATH and the task cwd is the bundle dir — so we resolve
+ * the package via createRequire and exec node_modules/.bin/claude by absolute
+ * path. On the VPS (claude installed globally) none of those exist on disk, so we
+ * fall back to CLAUDE_BIN or PATH `claude`. Works in both environments.
+ */
+function resolveClaudeBin(): string {
+  try {
+    const pkgJson = require.resolve("@anthropic-ai/claude-code/package.json");
+    const pkgDir = dirname(pkgJson);                 // .../node_modules/@anthropic-ai/claude-code
+    const nodeModules = dirname(dirname(pkgDir));    // .../node_modules
+    const candidates = [join(nodeModules, ".bin", "claude")];
+    try {
+      const pkg = JSON.parse(readFileSync(pkgJson, "utf8")) as { bin?: string | Record<string, string> };
+      const rel = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.claude;
+      if (rel) candidates.push(join(pkgDir, rel));
+    } catch { /* ignore malformed package.json */ }
+    for (const c of candidates) if (existsSync(c)) return c;
+  } catch { /* package not installed on disk (VPS global case) — fall through */ }
+  return process.env.CLAUDE_BIN || "claude";
+}
+
+/**
+ * Run the headless Claude Code CLI on the owner subscription. Returns the model
+ * text + token usage. Throws on missing CLI, error result, or empty output —
+ * the caller (propose) catches and falls back to DeepSeek. ANTHROPIC_API_KEY is
+ * explicitly stripped from the child env so a stray key can never route this
+ * through the billed API instead of the subscription. CLAUDE_CODE_OAUTH_TOKEN
+ * (the injected subscription token) is preserved — Claude Code reads it for auth.
+ */
+export function runClaudeCli(prompt: string, model: string): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
+  return new Promise((resolve, reject) => {
+    const HOME = process.env.CLAUDE_CWD || "/tmp/claude-home";
+    mkdirSync(HOME, { recursive: true });
+    const env = { ...process.env, HOME, ANTHROPIC_API_KEY: "" }; // subscription-only; keep CLAUDE_CODE_OAUTH_TOKEN
+    const bin = resolveClaudeBin();
+    const child = execFile(
+      bin,
+      ["-p", "--model", model, "--output-format", "json", "--dangerously-skip-permissions"],
+      { timeout: CLI_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, cwd: HOME, env },
+      (err, stdout, stderr) => {
+        if (err) return reject(new Error(`claude cli (${model}): ${err.message.slice(0, 160)} ${String(stderr).slice(0, 160)}`));
+        let j: ClaudeCliJson;
+        try { j = JSON.parse(stdout) as ClaudeCliJson; }
+        catch { return reject(new Error(`claude cli (${model}): non-JSON output: ${stdout.slice(0, 160)}`)); }
+        if (j.is_error || j.subtype !== "success") {
+          return reject(new Error(`claude cli (${model}) error: ${String(j.result ?? j.subtype).slice(0, 160)}`));
+        }
+        const text = j.result ?? "";
+        if (!text.trim()) return reject(new Error(`claude cli (${model}): empty result`));
+        resolve({ text, inputTokens: j.usage?.input_tokens ?? 0, outputTokens: j.usage?.output_tokens ?? 0 });
+      },
+    );
+    child.stdin?.write(prompt);
+    child.stdin?.end();
+  });
+}
+
+/** Anthropic ideation via the subscription Claude Code CLI (NO API key). */
+export async function proposeWithClaudeCli(
   lessons: string[],
   marketNotes: string,
   championSummary: string,
   nProposals = 4,
+  model = EVOLUTION_MODEL,
 ): Promise<{ proposals: LlmProposal[]; usage: LlmUsage }> {
-  const client = new Anthropic({ apiKey });
-  const raw = await client.messages.create({
-    model: "claude-fable-5",
-    max_tokens: 16000,
-    output_config: { effort: "medium", format: { type: "json_schema", schema: PROPOSAL_SCHEMA } },
-    messages: [{ role: "user", content: buildPrompt(lessons, marketNotes, nProposals, championSummary) }],
-  } as unknown as Parameters<typeof client.messages.create>[0]);
-  const resp = raw as unknown as {
-    stop_reason?: string;
-    content: { type: string; text?: string }[];
-    usage: { input_tokens: number; output_tokens: number };
-  };
+  const prompt = `${buildPrompt(lessons, marketNotes, nProposals, championSummary)}
 
-  if (resp.stop_reason === "refusal") {
-    throw new Error("fable refusal");
-  }
-  const text = resp.content.find((b) => b.type === "text")?.text ?? "";
-  const usage = resp.usage;
+Output ONLY a JSON object {"proposals":[{"rationale":str,"strategy":{...}}]} that conforms to this schema: ${JSON.stringify(PROPOSAL_SCHEMA)}. No prose, no markdown fences.`;
+  const { text, inputTokens, outputTokens } = await runClaudeCli(prompt, model);
+  const price = priceFor(model);
   return {
     proposals: parseProposals(text),
     usage: {
-      provider: "anthropic", model: "claude-fable-5",
-      inputTokens: usage.input_tokens, outputTokens: usage.output_tokens,
-      costUsd: (usage.input_tokens * FABLE_IN_PER_M + usage.output_tokens * FABLE_OUT_PER_M) / 1_000_000,
+      provider: "anthropic-cli", model,
+      inputTokens, outputTokens,
+      // Metric only — the subscription CLI is flat-rate, not billed per token.
+      costUsd: (inputTokens * price.in + outputTokens * price.out) / 1_000_000,
     },
   };
 }
@@ -184,21 +261,28 @@ export async function proposeWithDeepSeek(
   };
 }
 
-/** Fable first; on credit/availability/refusal errors fall back to DeepSeek. */
+/**
+ * Subscription Claude CLI first (when available — i.e. the CLI is on PATH);
+ * on any error fall back to DeepSeek (OpenRouter). No Anthropic API path.
+ * `allowClaudeCli` lets a caller force-skip the CLI (e.g. Trigger cloud, where
+ * the binary/creds don't exist) so it goes straight to DeepSeek.
+ */
 export async function propose(
-  keys: { anthropic?: string; openrouter?: string },
+  keys: { openrouter?: string },
   budgetLeftUsd: number,
   lessons: string[],
   marketNotes: string,
   championSummary: string,
   nProposals = 4,
+  opts?: { allowClaudeCli?: boolean; model?: string },
 ): Promise<{ proposals: LlmProposal[]; usage: LlmUsage } | { proposals: []; usage: null; skipped: string }> {
-  if (keys.anthropic && budgetLeftUsd > 0.3) {
+  const allowCli = opts?.allowClaudeCli ?? (process.env.EVOLUTION_DISABLE_CLI !== "1");
+  if (allowCli && budgetLeftUsd > -1) {
     try {
-      return await proposeWithFable(keys.anthropic, lessons, marketNotes, championSummary, nProposals);
+      return await proposeWithClaudeCli(lessons, marketNotes, championSummary, nProposals, opts?.model ?? EVOLUTION_MODEL);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`fable failed (${msg.slice(0, 120)}), falling back to deepseek`);
+      console.warn(`claude cli ideation failed (${msg.slice(0, 160)}), falling back to deepseek`);
     }
   }
   if (keys.openrouter) {

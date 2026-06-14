@@ -9,7 +9,7 @@ export default function LessonsPage() {
   return (
     <section className="panel p-5">
       <div className="hud mb-1">Lessons journal</div>
-      <p className="text-dim text-sm mb-4">Every failure and success writes a lesson. The next ideation cycle (Fable + GP operator weights) reads the last 25.</p>
+      <p className="text-dim text-sm mb-4">Every failure and success writes a lesson. The next ideation cycle (Opus + GP operator weights) reads the last 25.</p>
       <div className="space-y-2">
         {lessons?.map((l) => (
           <div key={l._id} className="flex gap-3 text-sm border-t border-edge/60 pt-2">

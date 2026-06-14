@@ -1,9 +1,9 @@
-// Fable ideation via the locally-authenticated Claude Code CLI (headless -p
+// Opus ideation via the locally-authenticated Claude Code CLI (headless -p
 // mode — an official Claude Code feature included in the Max subscription).
 // Personal-use automation: runs ONLY on this machine where the owner's CLI
 // session is logged in, ~8 low-volume calls/day, no key extraction, no cloud
 // credential copies. Proposals are schema-validated and then fight the same
-// gauntlet as every other candidate — Fable gets ideas, not privileges.
+// gauntlet as every other candidate — Opus gets ideas, not privileges.
 //
 // Usage: npx tsx scripts/ideate-cli.ts [nProposals]
 
@@ -11,22 +11,34 @@ import { execFile } from "node:child_process";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
 import { buildPrompt, parseProposals } from "../src/engine/llm";
+import { modelForLane } from "../src/engine/model";
 import { canonicalHash, familyHash, validateStrategy } from "../src/engine/dsl";
 import { getAppConfig, processCandidate } from "../src/pipeline/process";
 import { todayKey } from "../src/lib/appConfig";
 
-const MODEL = "claude-fable-5";
-const TIMEOUT_MS = 12 * 60 * 1000;
+// Strategy-lane model via the typo-proof resolver (Opus by default; never the
+// dead "claude-fable-5"). Subscription CLI only — ANTHROPIC_API_KEY is stripped
+// from the child env so this can never bill the API.
+const MODEL = modelForLane("strategy");
+const TIMEOUT_MS = Number(process.env.EVOLUTION_LLM_TIMEOUT_MS ?? 12 * 60 * 1000);
 
 function runClaude(prompt: string): Promise<string> {
   return new Promise((resolve, reject) => {
+    const env = { ...process.env };
+    delete env.ANTHROPIC_API_KEY; // subscription-only
     const child = execFile(
-      "claude",
-      ["-p", "--model", MODEL],
-      { timeout: TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, cwd: "/root" },
+      process.env.CLAUDE_BIN || "claude",
+      ["-p", "--model", MODEL, "--output-format", "json"],
+      { timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, cwd: process.env.CLAUDE_CWD || "/root", env },
       (err, stdout, stderr) => {
-        if (err) reject(new Error(`claude cli: ${err.message.slice(0, 200)} ${String(stderr).slice(0, 200)}`));
-        else resolve(stdout);
+        if (err) return reject(new Error(`claude cli (${MODEL}): ${err.message.slice(0, 200)} ${String(stderr).slice(0, 200)}`));
+        try {
+          const j = JSON.parse(stdout) as { is_error?: boolean; subtype?: string; result?: string };
+          if (j.is_error || j.subtype !== "success") return reject(new Error(`claude cli (${MODEL}) error: ${String(j.result ?? j.subtype).slice(0, 200)}`));
+          resolve(j.result ?? "");
+        } catch {
+          resolve(stdout); // tolerate a raw-text reply
+        }
       },
     );
     child.stdin?.write(prompt);
@@ -39,7 +51,7 @@ async function main() {
   const url = process.env.CONVEX_URL ?? process.env.NEXT_PUBLIC_CONVEX_URL;
   if (!url) throw new Error("CONVEX_URL missing");
   const cx = new ConvexHttpClient(url);
-  const runId = await cx.mutation(api.pipeline.startRun, { kind: "ideate-fable" });
+  const runId = await cx.mutation(api.pipeline.startRun, { kind: "ideate-opus" });
   try {
     const cfg = await getAppConfig(cx);
     const lessons = (await cx.query(api.pipeline.recentLessons, { limit: 30 })).map((l) => l.text);
@@ -70,12 +82,12 @@ Output ONLY the JSON object. No prose, no markdown fences.`;
 
     console.log(`asking ${MODEL} for ${n} proposals (${lessons.length} lessons in context)...`);
     const t0 = Date.now();
-    const raw = process.env.FABLE_RAW
-      ? (await import("node:fs")).readFileSync(process.env.FABLE_RAW, "utf-8")
+    const raw = process.env.IDEATE_RAW
+      ? (await import("node:fs")).readFileSync(process.env.IDEATE_RAW, "utf-8")
       : await runClaude(prompt);
-    console.log(`fable replied in ${((Date.now() - t0) / 1000).toFixed(0)}s (${raw.length} chars)`);
+    console.log(`claude replied in ${((Date.now() - t0) / 1000).toFixed(0)}s (${raw.length} chars)`);
     const { writeFileSync } = await import("node:fs");
-    writeFileSync("/tmp/fable-raw.txt", raw);
+    writeFileSync("/tmp/ideate-raw.txt", raw);
     const proposals = parseProposals(raw);
     console.log(`${proposals.length}/${n} proposals passed DSL validation`);
     if (proposals.length === 0) {
@@ -100,9 +112,9 @@ Output ONLY the JSON object. No prose, no markdown fences.`;
       if (validateStrategy(p.doc).length > 0) continue;
       const hash = canonicalHash(p.doc);
       if (await cx.query(api.candidates.hashExists, { hash })) { console.log(`  dup: ${p.doc.name}`); continue; }
-      p.doc.hypothesis = `${p.doc.hypothesis} [Fable/CLI] ${p.rationale.slice(0, 100)}`;
+      p.doc.hypothesis = `${p.doc.hypothesis} [Opus/CLI] ${p.rationale.slice(0, 100)}`;
       const { id, duplicate } = await cx.mutation(api.candidates.create, {
-        name: p.doc.name.startsWith("fable_") ? p.doc.name : `fable_${p.doc.name}`.slice(0, 40),
+        name: p.doc.name.startsWith("opus_") ? p.doc.name : `opus_${p.doc.name}`.slice(0, 40),
         source: "llm", dsl: JSON.stringify(p.doc), hash, familyHash: familyHash(p.doc), hypothesis: p.doc.hypothesis,
       });
       if (duplicate) continue;
