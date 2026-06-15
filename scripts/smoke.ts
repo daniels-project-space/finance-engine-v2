@@ -163,6 +163,48 @@ async function main() {
   const ss = seriesStats(mp.ret, mp.t, 8760);
   check("portfolio stats finite", Number.isFinite(ss.sharpe) && ss.maxDD <= 0);
 
+  console.log("— WAVE-3a crypto-native ops + signal-IC —");
+  {
+    const { toArrays } = await import("../src/engine/compile");
+    const { validateStrategy } = await import("../src/engine/dsl");
+    // bars carrying funding + spot + OI + LSR so every new input is live
+    const cnRng = mulberry32(9);
+    const cnBars: Bars = {
+      ...bars,
+      fundingT: bars.t.filter((_, i) => i % 8 === 0),
+      fundingR: bars.t.filter((_, i) => i % 8 === 0).map(() => (cnRng() - 0.5) * 0.001),
+      spotC: bars.c.map((c) => c * (1 - 0.0005 + cnRng() * 0.001)),
+      oiT: bars.t.filter((_, i) => i % 4 === 0),
+      oiV: bars.t.filter((_, i) => i % 4 === 0).map((_, i) => 100000 * (1 + 0.0002 * i)),
+      lsrT: bars.t.filter((_, i) => i % 4 === 0),
+      lsrR: bars.t.filter((_, i) => i % 4 === 0).map(() => 0.8 + cnRng() * 0.6),
+    };
+    const inpCN = toArrays(cnBars);
+    const finite = (a: Float64Array) => { let k = 0; for (const x of a) if (Number.isFinite(x) && x !== 0) k++; return k; };
+    check("funding dynamics derived (fundroc/z/accel/mom live)", finite(inpCN.fundroc) > 50 && finite(inpCN.fundzscore) > 50 && finite(inpCN.fundmom) > 50);
+    check("basis bar-aligned + small", finite(inpCN.basis) > 1000 && Math.max(...Array.from(inpCN.basis).map(Math.abs)) < 0.05);
+    check("OI + LSR forward-filled", finite(inpCN.oi) > 1000 && finite(inpCN.lsr) > 1000);
+    // a strategy that uses the new ops validates + trades
+    const cnStrat: StrategyDoc = {
+      name: "smoke_cn", hypothesis: "basis + funding-zscore contrarian smoke test for wave-3a inputs.",
+      longEntry: { op: "and", a: { op: "lt", a: { op: "fundzscore" }, b: { op: "const", value: -1 } }, b: { op: "gt", a: { op: "basis" }, b: { op: "const", value: 0 } } },
+      longExit: { op: "gt", a: { op: "fundzscore" }, b: { op: "const", value: 0 } },
+      params: {}, risk: { volTargetAnnual: 0.25, maxLeverage: 2 },
+    };
+    check("crypto-native strategy validates", validateStrategy(cnStrat).length === 0, JSON.stringify(validateStrategy(cnStrat)));
+    const cnRes = runBacktest(cnStrat, cnBars, {}, opts);
+    check("crypto-native strategy runs", Number.isFinite(cnRes.metrics.sharpe) && cnRes.metrics.trades >= 0, `trades=${cnRes.metrics.trades}`);
+    // hashing + canonicalization handle the new leaf ops
+    check("crypto-native ops hash deterministically", canonicalHash(cnStrat) === canonicalHash(JSON.parse(JSON.stringify(cnStrat))));
+    // IC layer: perfect-lead -> IC~1, noise -> ~0
+    const { informationCoefficient, forwardReturns, spearman } = await import("../src/engine/ic");
+    const fwd = forwardReturns(bars.c, 1);
+    const lead = new Float64Array(bars.c.length);
+    for (let i = 0; i < bars.c.length; i++) lead[i] = Number.isFinite(fwd[i]) ? fwd[i] : 0;
+    check("IC: perfect-lead -> IC>0.9", informationCoefficient(lead, fwd, 1).pooledIC > 0.9);
+    check("IC: identical signals corr=1", Math.abs(spearman([1, 2, 3, 4], [1, 2, 3, 4]) - 1) < 1e-9);
+  }
+
   console.log("— GP generation —");
   let valid = 0;
   for (let s = 0; s < 50; s++) if (validateStrategy(randomStrategy(s)).length === 0) valid++;

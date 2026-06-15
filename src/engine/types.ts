@@ -15,6 +15,14 @@ export type LogicOp = "and" | "or";
 export type Expr =
   | { op: "price"; field: PriceField }
   | { op: "funding" } // last-known perp funding rate per bar (carry/crowding signal)
+  // ---- WAVE-3a crypto-native inputs (forward-filled per bar; 0 before first stamp) ----
+  | { op: "fundroc" }   // funding rate-of-change vs the previous funding stamp (per-bar, last-known)
+  | { op: "fundzscore" }// funding z-score over a trailing window of funding stamps (crowding extremity)
+  | { op: "fundaccel" } // funding acceleration: change in fundroc (2nd difference of funding stamps)
+  | { op: "fundmom" }   // cumulative funding over a trailing window (carry momentum / paid-to-hold pressure)
+  | { op: "basis" }     // perp-spot basis (perpClose-spotClose)/spotClose — crypto carry signal
+  | { op: "oi" }        // open interest (base units), last-known per bar
+  | { op: "lsr" }       // taker long/short volume ratio, last-known per bar (positioning)
   | { op: "hourutc" } // bar-open hour in UTC, 0-23 (intraday seasonality)
   | { op: "dowutc" }  // bar-open day of week UTC, 0=Sun..6=Sat (calendar seasonality)
   | { op: "const"; value: number }
@@ -71,6 +79,15 @@ export interface Bars {
   /** funding timestamps (ms) and rates, 8h cadence; optional */
   fundingT?: number[];
   fundingR?: number[];
+  // ---- WAVE-3a crypto-native series (ADDITIVE; all optional, backward-compatible) ----
+  /** SPOT close aligned bar-for-bar with t (for perp-spot basis). Same length as t when present. */
+  spotC?: number[];
+  /** open-interest stamps (ms) + value (base units), ~5min cadence from the metrics archive */
+  oiT?: number[];
+  oiV?: number[];
+  /** taker long/short volume ratio stamps (ms) + ratio, ~5min cadence from the metrics archive */
+  lsrT?: number[];
+  lsrR?: number[];
 }
 
 export interface CostModel {

@@ -23,6 +23,7 @@ export default defineSchema({
     incubationStartedAt: v.optional(v.number()),
     mechanism: v.optional(v.string()),    // intelligence upgrade: recipe key that produced this candidate
     surprise: v.optional(v.number()),     // actual composite - expected (recipe mean) at evaluation
+    premium: v.optional(v.string()),      // WAVE-3b: inferred risk-premium family (LIVE-ADDITIVE label)
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -199,4 +200,75 @@ export default defineSchema({
     reachedStage: v.string(),
     createdAt: v.number(),
   }).index("by_createdAt", ["createdAt"]),
+
+  // ---- WAVE-2 SHADOW (ADDITIVE) ----
+  // The correlation-aware diversification BOOK: an ERC-weighted ensemble of the
+  // most recent S4+ survivors / incubating candidates' OOS streams. SHADOW: the
+  // book never drives promotion. `key` is a singleton row ("current"). members
+  // carry per-strategy weight + risk contribution + standalone Sharpe; stats is
+  // the book's OOS Sharpe/vol/maxDD. Empty members[] is the live steady state
+  // until a strategy survives.
+  book: defineTable({
+    key: v.string(),                // singleton: "current"
+    members: v.array(v.object({
+      candidateId: v.string(),
+      name: v.string(),
+      weight: v.number(),
+      riskContrib: v.number(),
+      standaloneSharpe: v.number(),
+    })),
+    weights: v.array(v.number()),
+    stats: v.object({
+      sharpe: v.number(),
+      vol: v.number(),
+      maxDD: v.number(),
+      meanRet: v.number(),
+      nBars: v.number(),
+    }),
+    meanAbsCorr: v.number(),        // mean off-diagonal |correlation| (diversification gauge)
+    nMembers: v.number(),
+    updatedAt: v.number(),
+  }).index("by_key", ["key"]),
+
+  // ---- WAVE-3a SHADOW (ADDITIVE) ----
+  // Signal-IC research report: the pooled IC-IR ranking of every catalog signal
+  // (incl. the crypto-native ones) over the pre-seal dev period, so generation /
+  // the dashboard can later PREFER high-IC signals. SHADOW: never drives anything.
+  // `key` is a singleton row ("current"). Rebuilt by the IC-ranking routine.
+  signalIcReports: defineTable({
+    key: v.string(),                // singleton: "current"
+    horizon: v.number(),            // forward-return label horizon (bars)
+    redundancyCorr: v.number(),     // |corr| threshold for the redundancy flag
+    symbolsPooled: v.array(v.string()),
+    ranked: v.array(v.object({
+      name: v.string(),
+      icMean: v.number(),
+      icIR: v.number(),
+      tStat: v.number(),
+      n: v.number(),
+      pooledIC: v.number(),
+      maxCorrToBetter: v.number(),
+      redundantWith: v.optional(v.string()),
+      redundant: v.boolean(),
+      cryptoNative: v.boolean(),    // is this one of the WAVE-3a crypto-native signals?
+    })),
+    updatedAt: v.number(),
+  }).index("by_key", ["key"]),
+
+  // ---- WAVE-3b (ADDITIVE) ----
+  // Per-risk-premium-family outcome rollup — mirrors mechanismStats but keyed by
+  // the inferred premium family (trend_momentum / carry_funding / ...), so the
+  // engine learns which PREMIA actually pay and generation can later prefer them.
+  // LIVE-ADDITIVE: written at gauntlet completion; reads never bind promotion.
+  premiumStats: defineTable({
+    premium: v.string(),            // PremiumFamily key
+    attempts: v.number(),           // candidates tagged with this premium that reached an outcome
+    survived: v.number(),           // reached >= S3 (made temporal-structure progress)
+    promotions: v.number(),         // reached incubation/eligible/champion
+    compositeSum: v.number(),       // running sum of composite (mean = sum/N)
+    compositeN: v.number(),
+    failedSealed: v.number(),       // died at S6-sealed (overfit signal for this premium)
+    failedS4: v.number(),           // died cross-symbol/portfolio
+    updatedAt: v.number(),
+  }).index("by_premium", ["premium"]),
 });

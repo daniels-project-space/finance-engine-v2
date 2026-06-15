@@ -8,6 +8,12 @@ const UN_OPS = new Set(["abs", "neg", "log", "sign", "sqrt"]);
 const CMP_OPS = new Set(["gt", "lt", "crossover", "crossunder"]);
 const LOGIC_OPS = new Set(["and", "or"]);
 const COMMUTATIVE = new Set(["add", "mul", "min2", "max2", "and", "or"]);
+// Nullary numeric leaf inputs (no children): market-data series read per bar.
+// WAVE-3a adds the crypto-native inputs alongside funding + the calendar ops.
+const NULLARY_NUM = new Set([
+  "funding", "hourutc", "dowutc",
+  "fundroc", "fundzscore", "fundaccel", "fundmom", "basis", "oi", "lsr",
+]);
 
 export type ExprKind = "num" | "bool";
 
@@ -23,7 +29,7 @@ export function checkExpr(e: unknown, params: Record<string, ParamSpec>, depth =
     if (!PRICE_FIELDS.has(node.field as string)) throw new DslError(`bad price field ${node.field}`);
     return "num";
   }
-  if (op === "funding" || op === "hourutc" || op === "dowutc") return "num";
+  if (NULLARY_NUM.has(op)) return "num";
   if (op === "const") {
     if (typeof node.value !== "number" || !Number.isFinite(node.value)) throw new DslError("bad const");
     return "num";
@@ -112,9 +118,6 @@ function canon(e: Expr, mode: "exact" | "family", paramOrder: Map<string, number
   const n = e as unknown as Record<string, unknown> & { op: string };
   switch (n.op) {
     case "price": return `price:${n.field}`;
-    case "funding": return "funding";
-    case "hourutc": return "hourutc";
-    case "dowutc": return "dowutc";
     case "const": {
       if (mode === "family") return "#";
       const v = n.value as number;
@@ -126,6 +129,7 @@ function canon(e: Expr, mode: "exact" | "family", paramOrder: Map<string, number
       return `p${paramOrder.get(n.name as string)}`;
     }
     default: {
+      if (NULLARY_NUM.has(n.op)) return n.op; // funding/basis/oi/... leaf inputs
       const parts: string[] = [];
       for (const k of ["src", "period", "a", "b"]) if (n[k]) parts.push(canon(n[k] as Expr, mode, paramOrder));
       if (COMMUTATIVE.has(n.op) && parts.length === 2) parts.sort();

@@ -6,6 +6,7 @@ export const create = mutation({
     name: v.string(), source: v.string(), parentIds: v.optional(v.array(v.string())),
     dsl: v.string(), hash: v.string(), familyHash: v.string(), hypothesis: v.string(),
     mechanism: v.optional(v.string()),   // intelligence upgrade: recipe key (bandit attribution)
+    premium: v.optional(v.string()),     // WAVE-3b: inferred risk-premium family (LIVE-ADDITIVE label)
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db.query("candidates").withIndex("by_hash", (q) => q.eq("hash", args.hash)).first();
@@ -39,6 +40,12 @@ export const get = query({
 export const setSurprise = mutation({
   args: { id: v.id("candidates"), surprise: v.number() },
   handler: (ctx, { id, surprise }) => ctx.db.patch(id, { surprise, updatedAt: Date.now() }),
+});
+
+// WAVE-3b: persist a candidate's inferred risk-premium family (LIVE-ADDITIVE).
+export const setPremium = mutation({
+  args: { id: v.id("candidates"), premium: v.string() },
+  handler: (ctx, { id, premium }) => ctx.db.patch(id, { premium, updatedAt: Date.now() }),
 });
 
 export const listByStage = query({

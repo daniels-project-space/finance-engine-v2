@@ -13,6 +13,31 @@ const FIELDS: PriceField[] = ["open", "high", "low", "close", "volume"];
 const SMOOTHERS = ["ema", "sma", "wma"] as const;
 const NORMALIZERS = ["zscore", "pctrank", "rsi"] as const;
 
+// ---- CALIBRATION PASS: IC-steered generation (config-gated, cold-start safe) --
+// generateBatch reads the persisted signal-IC report and calls setIcBias() with a
+// per-crypto-leaf-family weight derived from the ranking (basis / funding / oi /
+// lsr). The GP grammar sampler then PREFERS high-IC crypto-native inputs instead
+// of choosing uniformly. With no report (cold start) the bias is null => the old
+// uniform behavior is preserved exactly. Deterministic given a seed.
+export type CryptoLeafFamily = "funding" | "basis" | "oi" | "lsr";
+let IC_BIAS: Record<CryptoLeafFamily, number> | null = null;
+/** Set (or clear) the IC-derived per-family weight for crypto-native feature
+ *  selection. Pass null to restore uniform sampling. */
+export function setIcBias(weights: Record<CryptoLeafFamily, number> | null): void { IC_BIAS = weights; }
+export function getIcBias(): Record<CryptoLeafFamily, number> | null { return IC_BIAS; }
+
+/** Weighted pick over the 4 crypto-leaf families using the IC bias; uniform when
+ *  no bias is set. Returns the chosen family. */
+function pickCryptoFamily(rng: Rng): CryptoLeafFamily {
+  const fams: CryptoLeafFamily[] = ["funding", "basis", "oi", "lsr"];
+  if (!IC_BIAS) return pick(rng, fams);
+  const w = fams.map((f) => Math.max(1e-3, IC_BIAS![f] ?? 1e-3));
+  const sum = w.reduce((a, b) => a + b, 0);
+  let r = rng() * sum;
+  for (let i = 0; i < fams.length; i++) { r -= w[i]; if (r <= 0) return fams[i]; }
+  return fams[fams.length - 1];
+}
+
 let nameCounter = 0;
 function freshParam(params: Record<string, ParamSpec>, min: number, max: number, def: number, int = true): Expr {
   const name = `p${Object.keys(params).length}_${nameCounter++ % 1000}`;
@@ -55,13 +80,51 @@ function genFeature(rng: Rng, params: Record<string, ParamSpec>, depth: number):
     const lo: Expr = { op: "lowest", src: { op: "price", field: "low" }, period: n };
     return { op: "div", a: { op: "sub", a: close, b: lo }, b: { op: "max2", a: { op: "sub", a: hi, b: lo }, b: { op: "const", value: 1e-9 } } };
   }
-  if (choice < 0.9) {
+  if (choice < 0.85) {
     // volume-confirmed flow: zscore of volume
     return { op: "zscore", src: { op: "price", field: "volume" }, period: freshParam(params, 20, 200, 50) };
+  }
+  if (choice < 0.92) {
+    // WAVE-3a crypto-native feature: a normalized read of funding dynamics /
+    // basis / OI / positioning. These are pre-derived per bar (funding-roc/z/accel/
+    // mom) or raw last-known (basis/oi/lsr); normalize raw ones for scale-freedom.
+    return genCryptoFeature(rng, params);
   }
   // composed: feature-of-feature (the novel-indicator path)
   const inner = genFeature(rng, params, depth + 1);
   return { op: pick(rng, NORMALIZERS), src: inner, period: freshParam(params, 14, 150, randInt(rng, 20, 60)) };
+}
+
+// WAVE-3a: crypto-native numeric features. Funding-dynamics inputs are already
+// derived (roc/zscore/accel/mom), so they can be used directly or lightly
+// normalized; basis/oi/lsr are raw series, normalized for scale-freedom.
+function genCryptoFeature(rng: Rng, params: Record<string, ParamSpec>): Expr {
+  // CALIBRATION PASS: the leaf FAMILY is chosen IC-weighted (uniform if no bias);
+  // the within-family expression detail is rolled exactly as before.
+  const family = pickCryptoFamily(rng);
+  if (family === "funding") {
+    const c = rng();
+    if (c < 0.4) return { op: "fundzscore" };                     // funding crowding extremity (already z)
+    if (c < 0.65) return { op: "fundroc" };                       // funding momentum (Δf)
+    if (c < 0.82) return { op: "fundaccel" };                     // funding acceleration
+    return { op: "fundmom" };                                     // cumulative carry pressure
+  }
+  if (family === "basis") {
+    // basis dynamics: zscore/roc of perp-spot basis (carry mean-reversion)
+    const raw: Expr = { op: "basis" };
+    return rng() < 0.5
+      ? { op: "zscore", src: raw, period: freshParam(params, 24, 240, randInt(rng, 48, 120)) }
+      : { op: "roc", src: raw, period: freshParam(params, 6, 96, randInt(rng, 12, 48)) };
+  }
+  if (family === "oi") {
+    // open-interest dynamics: zscore or roc of OI (positioning build/flush)
+    const raw: Expr = { op: "oi" };
+    return rng() < 0.5
+      ? { op: "zscore", src: raw, period: freshParam(params, 24, 300, randInt(rng, 48, 168)) }
+      : { op: "roc", src: raw, period: freshParam(params, 6, 96, randInt(rng, 12, 48)) };
+  }
+  // taker long/short positioning, normalized
+  return { op: "zscore", src: { op: "lsr" }, period: freshParam(params, 24, 240, randInt(rng, 48, 120)) };
 }
 
 // ---------- boolean trigger generators ----------
@@ -69,7 +132,24 @@ function genTrigger(rng: Rng, params: Record<string, ParamSpec>): Expr {
   const close: Expr = { op: "price", field: "close" };
   const kind = rng();
   if (kind < 0.12) {
-    // funding/carry trigger: act against crowded positioning
+    // funding/carry trigger: act against crowded positioning. WAVE-3a: sometimes
+    // trigger on funding DYNAMICS (z-score extremity / acceleration) or basis,
+    // which lead spot funding extremes.
+    const flavor = rng();
+    if (flavor < 0.35) {
+      // funding z-score crowding extreme (already normalized — threshold in sd units)
+      const z = freshParam(params, 1, 3, 2, false);
+      return rng() < 0.5
+        ? { op: "lt", a: { op: "fundzscore" }, b: { op: "neg", a: z } }
+        : { op: "gt", a: { op: "fundzscore" }, b: z };
+    }
+    if (flavor < 0.55) {
+      // basis dislocation: enter when perp trades rich/cheap vs spot
+      const bth = freshParam(params, 0.0005, 0.01, 0.002, false);
+      return rng() < 0.5
+        ? { op: "gt", a: { op: "basis" }, b: bth }
+        : { op: "lt", a: { op: "basis" }, b: { op: "neg", a: bth } };
+    }
     const th = freshParam(params, 0.0001, 0.001, 0.0003, false);
     return rng() < 0.5
       ? { op: "lt", a: { op: "funding" }, b: { op: "neg", a: th } }
@@ -102,7 +182,12 @@ function genTrigger(rng: Rng, params: Record<string, ParamSpec>): Expr {
 function genFilter(rng: Rng, params: Record<string, ParamSpec>): Expr {
   const close: Expr = { op: "price", field: "close" };
   if (rng() < 0.2) {
-    // anti-crowding gate: only trade when funding is below a crowd threshold
+    // anti-crowding gate: only trade when funding is below a crowd threshold.
+    // WAVE-3a: sometimes gate on funding crowding z-score or an OI-expansion
+    // regime (rising OI = real positioning behind the move) instead.
+    const g = rng();
+    if (g < 0.4) return { op: "lt", a: { op: "fundzscore" }, b: freshParam(params, 0.5, 2.5, 1.5, false) };
+    if (g < 0.7) return { op: "gt", a: { op: "roc", src: { op: "oi" }, period: freshParam(params, 12, 96, 48) }, b: { op: "const", value: 0 } };
     return { op: "lt", a: { op: "funding" }, b: freshParam(params, 0.0001, 0.0008, 0.0003, false) };
   }
   if (rng() < 0.5) {

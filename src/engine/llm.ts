@@ -21,6 +21,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { validateStrategy } from "./dsl";
 import { EVOLUTION_MODEL, priceFor } from "./model";
+import { premiumCatalogText, PREMIUM_FAMILIES } from "./premia";
 import type { StrategyDoc } from "./types";
 
 const require = createRequire(import.meta.url);
@@ -52,6 +53,10 @@ Expr grammar (recursive):
  {"op":IND,"src":Expr,"period":Expr}                    // IND: ema sma wma rsi atr stdev highest lowest lag zscore slope pctrank median roc; period must be const or param
  {"op":"add|sub|mul|div|min2|max2","a":Expr,"b":Expr}
  {"op":"abs|neg|log|sign|sqrt","a":Expr}
+ {"op":"funding"}                                        // perp funding rate per bar (carry/crowding)
+ {"op":"fundroc"} {"op":"fundzscore"} {"op":"fundaccel"} {"op":"fundmom"} // funding DYNAMICS: Δfunding, funding z-score (crowding extremity, ~sd units), funding acceleration, trailing cumulative funding (carry momentum)
+ {"op":"basis"}                                          // perp-spot basis (perp-spot)/spot — carry dislocation; mean-reverting
+ {"op":"oi"} {"op":"lsr"}                                // open interest (base units) and taker long/short volume ratio — positioning; use zscore/roc to normalize
  {"op":"hourutc"} {"op":"dowutc"}                        // UTC hour 0-23 / day-of-week 0=Sun..6 (seasonality)
  {"op":"gt|lt|crossover|crossunder","a":Expr,"b":Expr}  // -> boolean
  {"op":"and|or","a":Expr,"b":Expr} {"op":"not","a":Expr}
@@ -86,9 +91,9 @@ const PROPOSAL_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-export function buildPrompt(lessons: string[], marketNotes: string, nProposals: number, championSummary: string): string {
+export function buildPrompt(lessons: string[], marketNotes: string, nProposals: number, championSummary: string, icRanking = ""): string {
   return `${DSL_GUIDE}
-
+${icSection(icRanking)}
 ## Current champion
 ${championSummary || "none yet"}
 
@@ -99,6 +104,119 @@ ${lessons.length ? lessons.map((l) => `- ${l}`).join("\n") : "- (no lessons yet)
 ${marketNotes || "(none)"}
 
 Propose ${nProposals} DIVERSE strategies (different mechanism families — don't submit ${nProposals} variations of one idea). Each must include a falsifiable hypothesis naming the structural reason the edge exists (who is on the other side / what friction creates it).`;
+}
+
+// CALIBRATION PASS: empirically-predictive-signal section for IC-steered prompts.
+// Injected only when the caller passes a non-empty ranking (cold-start safe).
+function icSection(icRanking: string): string {
+  if (!icRanking) return "";
+  return `
+## Empirically predictive signals (measured IC-IR over the dev period — PREFER these)
+The following signals have the strongest measured information coefficient (predictive
+power) on forward returns. Crypto-native inputs (basis / funding / OI dynamics) that
+rank highly are real edges — bias your designs toward the predictive signals below,
+not arbitrary price math:
+${icRanking}
+`;
+}
+
+// ----------------------------------------- WAVE-3b: premium-anchored prompt
+// Behind the DEFAULT-FALSE `premiumAnchoredGen` flag (checked by the caller).
+// Forces economically-grounded generation: the model must FIRST pick a target
+// risk-premium family, state its mechanism + a falsifiable hypothesis, then
+// build a strategy that harvests THAT premium with the relevant signals. The
+// parser (parseAnchoredProposals) rejects any proposal lacking a stated
+// mechanism, so vibes-only ideas never enter the pipeline on this path.
+const ANCHORED_SCHEMA = {
+  type: "object",
+  properties: {
+    proposals: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          premium: { type: "string", enum: PREMIUM_FAMILIES },
+          mechanism: { type: "string" },   // WHO pays / WHAT friction — REQUIRED
+          hypothesis: { type: "string" },  // falsifiable: what would prove it wrong
+          rationale: { type: "string" },
+          strategy: { type: "object", additionalProperties: true },
+        },
+        required: ["premium", "mechanism", "hypothesis", "strategy"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["proposals"],
+  additionalProperties: false,
+} as const;
+
+export function buildPremiumPrompt(lessons: string[], marketNotes: string, nProposals: number, championSummary: string, icRanking = ""): string {
+  return `${DSL_GUIDE}
+${icSection(icRanking)}
+## Risk-premium taxonomy (you MUST anchor every strategy to one of these families)
+A trading edge only persists if it harvests a structural RISK PREMIUM — a reason
+someone on the other side reliably pays. Choose a target family, then build rules
+that harvest IT with the signals listed for that family.
+${premiumCatalogText()}
+
+## Current champion
+${championSummary || "none yet"}
+
+## Journal of recent lessons (what failed/succeeded and why — do NOT repeat failures)
+${lessons.length ? lessons.map((l) => `- ${l}`).join("\n") : "- (no lessons yet)"}
+
+## Market notes
+${marketNotes || "(none)"}
+
+Propose ${nProposals} strategies, EACH targeting a DIFFERENT premium family. For each, in this ORDER:
+ 1. "premium": the target family (exactly one of: ${PREMIUM_FAMILIES.join(", ")}).
+ 2. "mechanism": the economic mechanism — WHO is on the other side and WHAT friction makes them pay. NO vibes. This is REQUIRED and a proposal with an empty or generic mechanism is rejected.
+ 3. "hypothesis": a FALSIFIABLE statement — what observable would prove this edge does NOT exist.
+ 4. "strategy": the DSL strategy that harvests that premium using its relevant signals.
+A strategy whose structure does not actually use the signals of its claimed premium is a weak proposal — make the rules harvest the premium you named.`;
+}
+
+const GENERIC_MECHANISM = /^(it should work|momentum|trend|mean reversion|edge|profit|alpha|vibes|n\/?a|none|tbd)\.?$/i;
+
+/**
+ * Parse premium-anchored proposals. Stricter than parseProposals: every proposal
+ * MUST carry a non-trivial `mechanism` string (>= ~20 chars, not a generic
+ * placeholder) AND a `premium` family, else it is dropped. The stated mechanism +
+ * hypothesis are folded into the StrategyDoc.hypothesis so downstream lessons and
+ * the dashboard keep the economic reasoning. Returns the same LlmProposal shape.
+ */
+export function parseAnchoredProposals(raw: string): (LlmProposal & { premium?: string })[] {
+  let parsed: unknown;
+  const cleaned = raw.replace(/```json\s*/g, "").replace(/```/g, "");
+  try { parsed = JSON.parse(cleaned); } catch {
+    const m = cleaned.match(/\{[\s\S]*\}/);
+    if (!m) return [];
+    try { parsed = JSON.parse(m[0]); } catch { return []; }
+  }
+  const env = parsed as { proposals?: unknown[] };
+  const arr = env?.proposals ?? (Array.isArray(parsed) ? parsed : undefined);
+  if (!Array.isArray(arr)) return [];
+  const out: (LlmProposal & { premium?: string })[] = [];
+  for (const item of arr) {
+    const it = item as { premium?: string; mechanism?: string; hypothesis?: string; rationale?: string; strategy?: StrategyDoc };
+    const mechanism = (it?.mechanism ?? "").trim();
+    // REJECT no-mechanism / placeholder-mechanism proposals — the whole point of
+    // the anchored path is that the edge is economically stated.
+    if (mechanism.length < 20 || GENERIC_MECHANISM.test(mechanism)) continue;
+    const doc = it?.strategy as StrategyDoc | undefined;
+    if (!doc) continue;
+    doc.risk = doc.risk ?? { volTargetAnnual: 0.25, maxLeverage: 2 };
+    doc.risk.volTargetAnnual = Math.min(Math.max(doc.risk.volTargetAnnual || 0.25, 0.1), 0.6);
+    doc.risk.maxLeverage = Math.min(doc.risk.maxLeverage || 2, 4);
+    if (doc.tf !== undefined && !["1h", "4h", "1d"].includes(doc.tf)) delete (doc as { tf?: string }).tf;
+    doc.params = doc.params ?? {};
+    // fold the stated mechanism + hypothesis into the doc hypothesis so the DSL's
+    // own "hypothesis required" check passes and the reasoning survives downstream.
+    const stated = `[${it.premium ?? "premium"}] ${mechanism}${it.hypothesis ? ` | falsifiable: ${it.hypothesis}` : ""}`;
+    doc.hypothesis = doc.hypothesis && doc.hypothesis.length >= 10 ? `${doc.hypothesis} — ${stated}` : stated;
+    if (validateStrategy(doc).length === 0) out.push({ doc, rationale: it.rationale ?? mechanism, premium: it.premium });
+  }
+  return out;
 }
 
 export function parseProposals(raw: string): LlmProposal[] {
@@ -204,14 +322,20 @@ export async function proposeWithClaudeCli(
   championSummary: string,
   nProposals = 4,
   model = EVOLUTION_MODEL,
+  anchored = false,
+  icRanking = "",
 ): Promise<{ proposals: LlmProposal[]; usage: LlmUsage }> {
-  const prompt = `${buildPrompt(lessons, marketNotes, nProposals, championSummary)}
+  const prompt = anchored
+    ? `${buildPremiumPrompt(lessons, marketNotes, nProposals, championSummary, icRanking)}
+
+Output ONLY a JSON object {"proposals":[{"premium":str,"mechanism":str,"hypothesis":str,"rationale":str,"strategy":{...}}]} that conforms to this schema: ${JSON.stringify(ANCHORED_SCHEMA)}. No prose, no markdown fences.`
+    : `${buildPrompt(lessons, marketNotes, nProposals, championSummary, icRanking)}
 
 Output ONLY a JSON object {"proposals":[{"rationale":str,"strategy":{...}}]} that conforms to this schema: ${JSON.stringify(PROPOSAL_SCHEMA)}. No prose, no markdown fences.`;
   const { text, inputTokens, outputTokens } = await runClaudeCli(prompt, model);
   const price = priceFor(model);
   return {
-    proposals: parseProposals(text),
+    proposals: anchored ? parseAnchoredProposals(text) : parseProposals(text),
     usage: {
       provider: "anthropic-cli", model,
       inputTokens, outputTokens,
@@ -227,6 +351,8 @@ export async function proposeWithDeepSeek(
   marketNotes: string,
   championSummary: string,
   nProposals = 4,
+  anchored = false,
+  icRanking = "",
 ): Promise<{ proposals: LlmProposal[]; usage: LlmUsage }> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 150_000); // ideation must never block the GP flywheel
@@ -242,8 +368,12 @@ export async function proposeWithDeepSeek(
       max_tokens: 6000,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: "Output ONLY a JSON object {\"proposals\":[{\"rationale\":str,\"strategy\":{...}}]}. No prose." },
-        { role: "user", content: buildPrompt(lessons, marketNotes, nProposals, championSummary) },
+        { role: "system", content: anchored
+          ? "Output ONLY a JSON object {\"proposals\":[{\"premium\":str,\"mechanism\":str,\"hypothesis\":str,\"rationale\":str,\"strategy\":{...}}]}. No prose."
+          : "Output ONLY a JSON object {\"proposals\":[{\"rationale\":str,\"strategy\":{...}}]}. No prose." },
+        { role: "user", content: anchored
+          ? buildPremiumPrompt(lessons, marketNotes, nProposals, championSummary, icRanking)
+          : buildPrompt(lessons, marketNotes, nProposals, championSummary, icRanking) },
       ],
     }),
   });
@@ -252,7 +382,7 @@ export async function proposeWithDeepSeek(
   const data = await resp.json() as { choices: { message: { content: string } }[]; usage?: { prompt_tokens: number; completion_tokens: number } };
   const text = data.choices?.[0]?.message?.content ?? "";
   return {
-    proposals: parseProposals(text),
+    proposals: anchored ? parseAnchoredProposals(text) : parseProposals(text),
     usage: {
       provider: "openrouter", model: "deepseek/deepseek-chat",
       inputTokens: data.usage?.prompt_tokens ?? 0, outputTokens: data.usage?.completion_tokens ?? 0,
@@ -274,12 +404,14 @@ export async function propose(
   marketNotes: string,
   championSummary: string,
   nProposals = 4,
-  opts?: { allowClaudeCli?: boolean; model?: string },
+  opts?: { allowClaudeCli?: boolean; model?: string; anchored?: boolean; icRanking?: string },
 ): Promise<{ proposals: LlmProposal[]; usage: LlmUsage } | { proposals: []; usage: null; skipped: string }> {
   const allowCli = opts?.allowClaudeCli ?? (process.env.EVOLUTION_DISABLE_CLI !== "1");
+  const anchored = opts?.anchored ?? false; // DEFAULT FALSE: legacy prompt unless caller opts in
+  const icRanking = opts?.icRanking ?? "";  // CALIBRATION PASS: IC-steered prompt (cold-start safe)
   if (allowCli && budgetLeftUsd > -1) {
     try {
-      return await proposeWithClaudeCli(lessons, marketNotes, championSummary, nProposals, opts?.model ?? EVOLUTION_MODEL);
+      return await proposeWithClaudeCli(lessons, marketNotes, championSummary, nProposals, opts?.model ?? EVOLUTION_MODEL, anchored, icRanking);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`claude cli ideation failed (${msg.slice(0, 160)}), falling back to deepseek`);
@@ -287,7 +419,7 @@ export async function propose(
   }
   if (keys.openrouter) {
     try {
-      return await proposeWithDeepSeek(keys.openrouter, lessons, marketNotes, championSummary, nProposals);
+      return await proposeWithDeepSeek(keys.openrouter, lessons, marketNotes, championSummary, nProposals, anchored, icRanking);
     } catch (err) {
       console.warn(`deepseek failed: ${err instanceof Error ? err.message : err}`);
     }

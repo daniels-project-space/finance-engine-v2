@@ -45,11 +45,24 @@ export const dailyMonitor = schedules.task({
 
         const snaps = await cx.query(api.paper.snapshots, { candidateId, sinceTs: cand.incubationStartedAt });
         const live = liveSharpe(snaps as { ret: number }[]);
-        const metrics = cand.metrics ? JSON.parse(cand.metrics) as { bootstrapP5?: number } : {};
+        const metrics = cand.metrics ? JSON.parse(cand.metrics) as { bootstrapP5?: number; bookQualifies?: boolean; marginalBookSharpe?: number; maxBookCorr?: number } : {};
         const band = (metrics.bootstrapP5 ?? 0) - 0.5; // tolerance: live can run half a Sharpe below the backtest 5th pct
+        // CALIBRATION PASS: a candidate also qualifies for ELIGIBILITY when it is
+        // BOOK-QUALIFYING (marginal book-Sharpe lift OR low-corr + positive edge,
+        // from the Wave-2 book) — not only when it beats its standalone band. The
+        // book is now a promotion TARGET. This only broadens eligibility; the
+        // champion-swap APPROVAL gate (step 2) is unchanged.
+        const bookQualifies = cfg.bookPromotion && metrics.bookQualifies === true;
         if (live >= band) {
           await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "eligible" });
           events.push(`🎓 "${cand.name}" graduated incubation (${days.toFixed(0)}d, live sharpe ${live.toFixed(2)} vs band ${band.toFixed(2)})`);
+        } else if (bookQualifies) {
+          await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "eligible" });
+          await cx.mutation(api.pipeline.addLesson, {
+            source: cand.source, candidateId,
+            text: `BOOK-ELIGIBLE: "${cand.name}" missed its standalone band (live ${live.toFixed(2)} < ${band.toFixed(2)}) but qualifies as a book diversifier (marginalBookSharpe ${(metrics.marginalBookSharpe ?? 0).toFixed(2)}, maxBookCorr ${(metrics.maxBookCorr ?? 0).toFixed(2)}). Awaiting approval.`,
+          });
+          events.push(`📚 "${cand.name}" graduated as a BOOK DIVERSIFIER (live ${live.toFixed(2)}, marg ${(metrics.marginalBookSharpe ?? 0).toFixed(2)}, corr ${(metrics.maxBookCorr ?? 0).toFixed(2)}) — awaiting Daniel's approval`);
         } else {
           await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: "S7-paper", failedReason: `live sharpe ${live.toFixed(2)} below band ${band.toFixed(2)}` });
           await cx.mutation(api.pipeline.addLesson, {
@@ -60,15 +73,30 @@ export const dailyMonitor = schedules.task({
         }
       }
 
-      // ---- 2. auto-promotion ----
+      // ---- 2. auto-promotion (UNCHANGED standalone path) + book approval gate ----
       if (cfg.autoPromote) {
         const eligibleAll = await cx.query(api.candidates.listByStage, { stage: "eligible" });
         const best = eligibleAll.filter((c) => c.composite !== undefined).sort((a, b) => (b.composite ?? 0) - (a.composite ?? 0))[0];
+        const champComposite = champion?.composite ?? 0;
+        let autoSwapped: string | undefined;
         if (best) {
-          const champComposite = champion?.composite ?? 0;
+          // STANDALONE auto-swap: unchanged — a candidate that beats the champion
+          // on standalone composite by the beat ratio is auto-promoted ("auto").
           if (!champion || (best.composite ?? 0) >= champComposite * cfg.floors.championBeatRatio) {
             await cx.mutation(api.promotions.promote, { candidateId: best._id as Id<"candidates">, approvedBy: "auto", note: `composite ${(best.composite ?? 0).toFixed(2)} vs champion ${champComposite.toFixed(2)}` });
             events.push(`👑 PROMOTED "${best.name}" to champion (composite ${(best.composite ?? 0).toFixed(2)}${champion ? `, replacing "${champion.name}" — archived, rollback available` : ""})`);
+            autoSwapped = best._id as string;
+          }
+        }
+        // CALIBRATION PASS — APPROVAL GATE: book-diversifier eligibles that did NOT
+        // win the standalone swap are NOT auto-promoted. They wait for Daniel's
+        // manual approval (promotions.promote approvedBy:"daniel"). Surface them.
+        if (cfg.bookPromotion) {
+          const awaiting = eligibleAll.filter((c) =>
+            (c._id as string) !== autoSwapped &&
+            (champion ? (c.composite ?? 0) < champComposite * cfg.floors.championBeatRatio : false));
+          if (awaiting.length) {
+            events.push(`📋 ${awaiting.length} book-diversifier eligible(s) AWAITING APPROVAL (not auto-swapped): ${awaiting.map((c) => `"${c.name}" (composite ${(c.composite ?? 0).toFixed(2)})`).join(", ")}`);
           }
         }
       }

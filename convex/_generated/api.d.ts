@@ -8,11 +8,14 @@
  * @module
  */
 
+import type * as book from "../book.js";
 import type * as candidates from "../candidates.js";
 import type * as ledger from "../ledger.js";
 import type * as paper from "../paper.js";
 import type * as pipeline from "../pipeline.js";
+import type * as premium from "../premium.js";
 import type * as promotions from "../promotions.js";
+import type * as signalIc from "../signalIc.js";
 
 import type {
   ApiFromModules,
@@ -21,11 +24,14 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  book: typeof book;
   candidates: typeof candidates;
   ledger: typeof ledger;
   paper: typeof paper;
   pipeline: typeof pipeline;
+  premium: typeof premium;
   promotions: typeof promotions;
+  signalIc: typeof signalIc;
 }>;
 
 /**

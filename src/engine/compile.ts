@@ -5,22 +5,92 @@ export interface CompiledInputs {
   o: Float64Array; h: Float64Array; l: Float64Array; c: Float64Array; v: Float64Array;
   /** last-known funding rate per bar (forward-filled from 8h stamps; 0 before first) */
   f: Float64Array;
+  // ---- WAVE-3a crypto-native derived inputs (forward-filled per bar) ----
+  /** funding rate-of-change vs previous stamp (Δf), per bar last-known; 0 before first */
+  fundroc: Float64Array;
+  /** funding z-score over a trailing window of funding stamps (crowding extremity); 0/NaN-safe */
+  fundzscore: Float64Array;
+  /** funding acceleration: Δ(Δf) — second difference of funding stamps, per bar last-known */
+  fundaccel: Float64Array;
+  /** cumulative funding over a trailing window of stamps (carry momentum) */
+  fundmom: Float64Array;
+  /** perp-spot basis (perpClose - spotClose)/spotClose per bar; 0 where spot is unavailable */
+  basis: Float64Array;
+  /** open interest (base units), last-known per bar (forward-filled from ~5min stamps; 0 before first) */
+  oi: Float64Array;
+  /** taker long/short volume ratio, last-known per bar (forward-filled; 0 before first) */
+  lsr: Float64Array;
   /** bar-open hour UTC (0-23) and day-of-week UTC (0=Sun..6=Sat) */
   hour: Float64Array;
   dow: Float64Array;
 }
 
+/** trailing windows (in FUNDING STAMPS, ~3/day) for the funding-dynamics inputs. */
+export const FUNDING_DYN = { zWindow: 21, momWindow: 21 }; // ~7 days of 8h stamps
+
 export function toArrays(bars: Bars): CompiledInputs {
   const n = bars.t.length;
   const f = new Float64Array(n);
+  const fundroc = new Float64Array(n);
+  const fundzscore = new Float64Array(n);
+  const fundaccel = new Float64Array(n);
+  const fundmom = new Float64Array(n);
+
   if (bars.fundingT && bars.fundingR && bars.fundingT.length) {
+    // 1) derive the funding-DYNAMICS series at STAMP resolution (causal, last-known
+    //    semantics carry over to bars). roc=Δf, accel=Δ(Δf), z=trailing z of f,
+    //    mom=trailing sum of f. Windows are in stamps (~3/day). No look-ahead: each
+    //    stamp uses only stamps at or before it.
+    const ft = bars.fundingT, fr = bars.fundingR;
+    const m = ft.length;
+    const rocStamp = new Float64Array(m);
+    const accelStamp = new Float64Array(m);
+    const zStamp = new Float64Array(m);
+    const momStamp = new Float64Array(m);
+    const zW = FUNDING_DYN.zWindow, momW = FUNDING_DYN.momWindow;
+    let sum = 0, sumSq = 0, cnt = 0;        // trailing window of f for z + mean
+    let momSum = 0, momCnt = 0;             // trailing window of f for momentum
+    for (let i = 0; i < m; i++) {
+      rocStamp[i] = i > 0 ? fr[i] - fr[i - 1] : 0;
+      accelStamp[i] = i > 1 ? rocStamp[i] - rocStamp[i - 1] : 0;
+      // rolling z over [i-zW+1, i]
+      sum += fr[i]; sumSq += fr[i] * fr[i]; cnt++;
+      if (cnt > zW) { const o = fr[i - zW]; sum -= o; sumSq -= o * o; cnt--; }
+      if (cnt >= Math.max(3, Math.floor(zW / 2))) {
+        const mean = sum / cnt;
+        const sd = Math.sqrt(Math.max(0, sumSq / cnt - mean * mean));
+        zStamp[i] = sd > 1e-12 ? (fr[i] - mean) / sd : 0;
+      }
+      // rolling cumulative funding (carry momentum) over [i-momW+1, i]
+      momSum += fr[i]; momCnt++;
+      if (momCnt > momW) { momSum -= fr[i - momW]; momCnt--; }
+      momStamp[i] = momSum;
+    }
+    // 2) forward-fill stamp series onto bars (last-known at/<= bar open time)
     let fi = 0;
-    let last = 0;
+    let last = 0, lastRoc = 0, lastZ = 0, lastAccel = 0, lastMom = 0;
     for (let i = 0; i < n; i++) {
-      while (fi < bars.fundingT.length && bars.fundingT[fi] <= bars.t[i]) { last = bars.fundingR[fi]; fi++; }
-      f[i] = last;
+      while (fi < ft.length && ft[fi] <= bars.t[i]) {
+        last = fr[fi]; lastRoc = rocStamp[fi]; lastZ = zStamp[fi]; lastAccel = accelStamp[fi]; lastMom = momStamp[fi];
+        fi++;
+      }
+      f[i] = last; fundroc[i] = lastRoc; fundzscore[i] = lastZ; fundaccel[i] = lastAccel; fundmom[i] = lastMom;
     }
   }
+
+  // basis: aligned bar-for-bar with t when spotC is present.
+  const basis = new Float64Array(n);
+  if (bars.spotC && bars.spotC.length === n) {
+    for (let i = 0; i < n; i++) {
+      const s = bars.spotC[i];
+      basis[i] = s > 0 ? (bars.c[i] - s) / s : 0;
+    }
+  }
+
+  // open interest + long/short ratio: forward-fill last-known from ~5min stamps.
+  const oi = ffillStamps(bars.oiT, bars.oiV, bars.t, n);
+  const lsr = ffillStamps(bars.lsrT, bars.lsrR, bars.t, n);
+
   const hour = new Float64Array(n);
   const dow = new Float64Array(n);
   for (let i = 0; i < n; i++) {
@@ -31,8 +101,20 @@ export function toArrays(bars: Bars): CompiledInputs {
   return {
     o: Float64Array.from(bars.o), h: Float64Array.from(bars.h),
     l: Float64Array.from(bars.l), c: Float64Array.from(bars.c), v: Float64Array.from(bars.v),
-    f, hour, dow,
+    f, fundroc, fundzscore, fundaccel, fundmom, basis, oi, lsr, hour, dow,
   };
+}
+
+/** Forward-fill a (stamps,values) series onto bar timestamps; 0 before the first stamp. */
+function ffillStamps(stampsT: number[] | undefined, stampsV: number[] | undefined, barT: number[], n: number): Float64Array {
+  const out = new Float64Array(n);
+  if (!stampsT || !stampsV || !stampsT.length) return out;
+  let si = 0, last = 0;
+  for (let i = 0; i < n; i++) {
+    while (si < stampsT.length && stampsT[si] <= barT[i]) { last = stampsV[si]; si++; }
+    out[i] = last;
+  }
+  return out;
 }
 
 type Memo = Map<string, Float64Array | Uint8Array>;
@@ -48,9 +130,10 @@ function key(e: Expr, params: Record<string, number>): string {
   const n = e as unknown as Record<string, unknown> & { op: string };
   switch (n.op) {
     case "price": return `price:${n.field}`;
-    case "funding": return "funding";
-    case "hourutc": return "hourutc";
-    case "dowutc": return "dowutc";
+    case "funding": case "hourutc": case "dowutc":
+    case "fundroc": case "fundzscore": case "fundaccel": case "fundmom":
+    case "basis": case "oi": case "lsr":
+      return n.op;
     case "const": return `c:${n.value}`;
     case "param": return `pv:${params[n.name as string]}`;
     default: {
@@ -76,6 +159,13 @@ export function evalNum(e: Expr, inp: CompiledInputs, params: Record<string, num
       break;
     }
     case "funding": { out = inp.f; break; }
+    case "fundroc": { out = inp.fundroc; break; }
+    case "fundzscore": { out = inp.fundzscore; break; }
+    case "fundaccel": { out = inp.fundaccel; break; }
+    case "fundmom": { out = inp.fundmom; break; }
+    case "basis": { out = inp.basis; break; }
+    case "oi": { out = inp.oi; break; }
+    case "lsr": { out = inp.lsr; break; }
     case "hourutc": { out = inp.hour; break; }
     case "dowutc": { out = inp.dow; break; }
     case "const": { out = new Float64Array(len).fill(n.value as number); break; }

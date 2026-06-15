@@ -8,11 +8,16 @@ import { mergeConfig, todayKey, type AppConfig } from "../lib/appConfig";
 import { loadBars } from "../lib/data";
 import { artifactKey, putJsonGz } from "../lib/storage";
 import { canonicalHash, familyHash, validateStrategy } from "../engine/dsl";
-import { crossoverStrategies, mutateStrategy, randomStrategy, recipeOf, MUTATION_OPS, type MutationHint, type MutationOp } from "../engine/evolve";
+import { crossoverStrategies, mutateStrategy, randomStrategy, recipeOf, setIcBias, MUTATION_OPS, type MutationHint, type MutationOp } from "../engine/evolve";
+import { icFamilyWeights, icRankingText, type IcRankedRow } from "../engine/signals";
 import { SEED_LIBRARY } from "../engine/library";
 import { IMPORTED_LIBRARY } from "../engine/imports";
 import { evaluateSealed, runGauntlet } from "../engine/gauntlet";
+import { realityCheck } from "../engine/rigor";
+import { buildBook, marginalContribution, bookQualifies, type Stream } from "../engine/book";
 import { propose } from "../engine/llm";
+import { premiumOf } from "../engine/premia";
+import { setBayesTuning } from "../engine/tune";
 import { thompsonPick, antiThompsonPick, type Arm } from "../engine/bandit";
 import { mulberry32 } from "../engine/stats";
 import { PPY, type Bars, type StrategyDoc } from "../engine/types";
@@ -31,6 +36,24 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
 
   const todayCount = await cx.query(api.pipeline.getCounter, { key: todayKey("candidates") });
   if (todayCount >= cfg.evo.maxCandidatesPerDay) { summary.llmSkipped = "daily candidate cap"; return summary; }
+
+  // CALIBRATION PASS: IC-steered generation. Read the persisted signal-IC report
+  // once per batch; bias the GP grammar sampler toward high-IC crypto-leaf
+  // families and build the ranking text for the LLM prompt. Cold-start safe — no
+  // report (or icSteering off) leaves the bias null (uniform) and the text empty.
+  let icRanking = "";
+  try {
+    if (cfg.icSteering) {
+      const report = await cx.query(api.signalIc.get, {}) as { ranked?: IcRankedRow[] } | null;
+      const ranked = report?.ranked;
+      setIcBias(icFamilyWeights(ranked));
+      icRanking = icRankingText(ranked);
+      if (icRanking) log(`IC-steering ON: ${ranked?.length ?? 0} ranked signals; GP+LLM prefer high-IC inputs`);
+      else log(`IC-steering ON but no usable report yet — uniform sampling (cold start)`);
+    } else {
+      setIcBias(null);
+    }
+  } catch (e) { setIcBias(null); log(`IC-steering skipped: ${e instanceof Error ? e.message.slice(0, 80) : e}`); }
 
   const champion = await cx.query(api.candidates.champion, {});
   const leaders = await cx.query(api.candidates.leaderboard, { limit: 12 });
@@ -185,7 +208,8 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
     const result = await propose(
       { openrouter: process.env.OPENROUTER_API_KEY },
       budgetLeft, lessons, "", championSummary, cfg.evo.batchLlm,
-      { allowClaudeCli: allowCli },
+      // WAVE-3b: premium-anchored prompt behind the DEFAULT-FALSE flag.
+      { allowClaudeCli: allowCli, anchored: cfg.generation.premiumAnchoredGen, icRanking },
     );
     if ("skipped" in result) summary.llmSkipped = result.skipped;
     else {
@@ -212,9 +236,14 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
     const famCount = await cx.query(api.candidates.familySeenCount, { familyHash: fam });
     if (famCount >= 10) { summary.duplicates++; continue; }
     const mechanism = p.mechanism ?? "fresh";
+    // WAVE-3b LIVE-ADDITIVE: tag the inferred risk-premium family. Best-effort —
+    // classification is pure/deterministic and never throws on a valid doc, but
+    // guard anyway so a tagging bug can never block candidate registration.
+    let premium: string | undefined;
+    try { premium = premiumOf(p.doc); } catch { premium = undefined; }
     const { id, duplicate } = await cx.mutation(api.candidates.create, {
       name: p.doc.name, source: p.source, parentIds: p.parentIds,
-      dsl: JSON.stringify(p.doc), hash, familyHash: fam, hypothesis: p.doc.hypothesis, mechanism,
+      dsl: JSON.stringify(p.doc), hash, familyHash: fam, hypothesis: p.doc.hypothesis, mechanism, premium,
     });
     if (duplicate) { summary.duplicates++; continue; }
     await cx.mutation(api.candidates.updateStage, { id, stage: "queued" });
@@ -236,13 +265,28 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
 // ---------------------------------------------------------------- gauntlet
 export interface ProcessResult { passed: boolean; stage?: string; composite?: number }
 
-export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: string, log: Log): Promise<ProcessResult> {
+/** In-memory accumulator for the batch-level Reality Check (Feature 3, shadow)
+ *  AND the Wave-2 diversification book (Feature A). Each entry is the deployed-
+ *  portfolio OOS return stream (with its timestamp axis) of an S4+ survivor. */
+export type ShadowOosCollector = { candidateId: string; name: string; t: number[]; ret: number[] }[];
+
+export interface ProcessOpts {
+  /** when present, S4+ survivors push their portfolio OOS returns for batch RC */
+  shadowCollector?: ShadowOosCollector;
+}
+
+export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: string, log: Log, popts: ProcessOpts = {}): Promise<ProcessResult> {
   const candidateId = candidateIdRaw as Id<"candidates">;
   const cand = await cx.query(api.candidates.get, { id: candidateId });
   if (!cand) throw new Error("candidate not found");
   const cfg = await getAppConfig(cx);
   const doc = JSON.parse(cand.dsl) as StrategyDoc;
   const sealTs = Date.parse(cfg.sealDate);
+
+  // WAVE-3b: select the tuner for this process. DEFAULT FALSE => legacy adaptive
+  // random-search + hill-climb (unchanged). When `bayesTuning` is on, tune() and
+  // tuneWithConfigs() delegate to the TPE Bayesian optimizer (same interface).
+  setBayesTuning(cfg.tuning.bayesTuning, cfg.tuning.bayes);
 
   // intelligence upgrade: at every terminal point, attribute the outcome back
   // to the recipe (updates the bandit's Beta posteriors + ledger means) and,
@@ -275,6 +319,13 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
         }
       }
     } catch (e) { log(`ledger finalize skipped: ${e instanceof Error ? e.message.slice(0, 80) : e}`); }
+    // WAVE-3b ADDITIVE: attribute the outcome to the candidate's premium family
+    // so the engine learns which premia pay. Independent best-effort block — a
+    // premiumStats hiccup must never affect the gauntlet or the mechanism ledger.
+    try {
+      const premium = (cand as { premium?: string }).premium;
+      if (premium) await cx.mutation(api.premium.recordPremiumOutcome, { premium, reachedStage, composite });
+    } catch (e) { log(`premium finalize skipped: ${e instanceof Error ? e.message.slice(0, 80) : e}`); }
   };
 
   await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "gauntlet" });
@@ -304,7 +355,44 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   const nTrials = await cx.query(api.pipeline.getCounter, { key: "trials_total" });
   await cx.mutation(api.pipeline.bumpCounter, { key: "trials_total", by: 1 });
 
-  const report = runGauntlet({ doc, primary, others, sealTs, floors: cfg.floors, nTrialsTotal: Math.max(nTrials, 10), log });
+  const report = runGauntlet({
+    doc, primary, others, sealTs, floors: cfg.floors, nTrialsTotal: Math.max(nTrials, 10), log,
+    // CALIBRATION PASS: binding gates that CHANGE pass/fail (Daniel-approved).
+    binding: {
+      purgedWf: cfg.walkforward.purged,
+      pbo: { bind: cfg.shadowRigor.pbo.bind, max: cfg.shadowRigor.pbo.max, blocks: cfg.shadowRigor.pboBlocks },
+      regime: {
+        bind: cfg.shadowRigor.regime.bind,
+        minObs: cfg.shadowRigor.regime.minObs,
+        minSharpe: cfg.shadowRigor.regime.minSharpe,
+        maxPnlConcentration: cfg.shadowRigor.regime.maxPnlConcentration,
+      },
+    },
+    shadowRigor: cfg.shadowRigor.compute ? {
+      enabled: true,
+      pboBlocks: cfg.shadowRigor.pboBlocks,
+      pboWarnAt: cfg.shadowRigor.pboWarnAt,
+      stabilityWarnAt: cfg.shadowRigor.stabilityWarnAt,
+      regimeMinObs: cfg.shadowRigor.regimeMinObs,
+      regimeMinSharpeWarnAt: cfg.shadowRigor.regimeMinSharpeWarnAt,
+      // WAVE-2 Feature B: capacity/impact (shadow), only if enabled in config
+      capacity: cfg.capacity.enabled ? {
+        enabled: true,
+        k: cfg.capacity.k,
+        capFloorFrac: cfg.capacity.capFloorFrac,
+        capFloorAbs: cfg.capacity.capFloorAbs,
+        refAumUsd: cfg.capacity.refAumUsd,
+        advWindow: cfg.capacity.advWindow,
+      } : { enabled: false },
+    } : { enabled: false },
+  });
+
+  // Batch-level Reality Check (Feature 3) + diversification book (Feature A):
+  // any S4+ survivor contributes its deployed-portfolio OOS stream (with the
+  // timestamp axis, for book correlation alignment) to the cycle's collector.
+  if (popts.shadowCollector && report.portfolioOos && report.portfolioOos.ret.length >= 30) {
+    popts.shadowCollector.push({ candidateId: candidateIdRaw, name: cand.name, t: report.portfolioOos.t, ret: report.portfolioOos.ret });
+  }
 
   for (const s of report.stages) {
     await cx.mutation(api.pipeline.addGateReport, {
@@ -312,7 +400,9 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
       report: JSON.stringify(s.detail ?? {}).slice(0, 20_000), durationMs: s.durationMs,
     });
   }
-  await putJsonGz(artifactKey(cand.hash, "gauntlet"), report);
+  // strip the (heavy) OOS stream before persisting the artifact; metrics already
+  // carry the scalar shadow-rigor numbers.
+  await putJsonGz(artifactKey(cand.hash, "gauntlet"), { ...report, portfolioOos: undefined });
   const curvesJson = (extra?: object) => JSON.stringify({ ...(report.curves ?? {}), ...(extra ?? {}) });
 
   if (!report.passed) {
@@ -394,4 +484,123 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   log(`PASSED -> incubating, composite=${composite.toFixed(2)}`);
   await finalizeLedger("incubating", composite);
   return { passed: true, composite };
+}
+
+// ----------------------------------------------- Feature 3: batch Reality Check
+export interface RealityCheckBatchResult {
+  ran: boolean;
+  nCandidates: number;
+  bestName?: string;
+  bestRcP?: number;
+  bestSpaP?: number;
+  perCandidateP?: { candidateId: string; name: string; familyWiseP: number }[];
+  note?: string;
+}
+
+/**
+ * White's Reality Check / Hansen's SPA over the cycle's S4+ survivors (those
+ * that produced a deployed-portfolio OOS stream). SHADOW MODE: stores a
+ * run-level metric + per-candidate family-wise p on each candidate's metrics
+ * JSON, and logs the result. NEVER changes a pass/fail or composite.
+ *
+ * Call ONCE at the end of a cycle with the collector populated by
+ * processCandidate(..., { shadowCollector }).
+ */
+export async function runRealityCheckBatch(
+  cx: ConvexHttpClient, collector: ShadowOosCollector, log: Log,
+): Promise<RealityCheckBatchResult> {
+  const cfg = await getAppConfig(cx);
+  if (!cfg.shadowRigor.compute || !cfg.shadowRigor.realityCheck) return { ran: false, nCandidates: collector.length, note: "disabled" };
+  if (collector.length < 2) return { ran: false, nCandidates: collector.length, note: "need >=2 S4+ survivors" };
+
+  const rc = realityCheck(collector.map((c) => c.ret), { nReps: cfg.shadowRigor.rcReps });
+  const best = rc.bestIndex >= 0 ? collector[rc.bestIndex] : undefined;
+  const per = collector.map((c, i) => ({ candidateId: c.candidateId, name: c.name, familyWiseP: rc.perCandidateP[i] }));
+
+  // shadow-persist: merge familyWiseP into each candidate's metrics JSON (best-effort)
+  for (const p of per) {
+    try {
+      const cand = await cx.query(api.candidates.get, { id: p.candidateId as Id<"candidates"> });
+      if (!cand) continue;
+      const m = cand.metrics ? JSON.parse(cand.metrics) : {};
+      m.rcFamilyWiseP = p.familyWiseP;
+      m.rcWouldFail = p.familyWiseP > cfg.shadowRigor.rcWarnAt;
+      await cx.mutation(api.candidates.updateStage, { id: p.candidateId as Id<"candidates">, stage: cand.stage, metrics: JSON.stringify(m) });
+    } catch (e) { log(`RC metric patch skipped: ${e instanceof Error ? e.message.slice(0, 80) : e}`); }
+  }
+
+  log(`shadow-rigor RC: ${collector.length} survivors, best="${best?.name}" familyWiseP=${rc.bestRcP.toFixed(3)} spaP=${rc.bestSpaP.toFixed(3)} (warnAt ${cfg.shadowRigor.rcWarnAt})${rc.bestRcP > cfg.shadowRigor.rcWarnAt ? " WOULD-FAIL" : ""}`);
+  return { ran: true, nCandidates: collector.length, bestName: best?.name, bestRcP: rc.bestRcP, bestSpaP: rc.bestSpaP, perCandidateP: per };
+}
+
+// ----------------------------------------------- Feature A: diversification book
+export interface BookBatchResult {
+  ran: boolean;
+  nMembers: number;
+  bookSharpe?: number;
+  meanAbsCorr?: number;
+  note?: string;
+}
+
+/**
+ * Build the WAVE-2 SHADOW diversification book from this cycle's S4+ survivors'
+ * deployed-portfolio OOS streams (ERC risk-parity weighting), persist it to the
+ * Convex `book` singleton, and write each survivor's marginal contribution
+ * (book-Sharpe lift, max book correlation, bookQualifies flag) onto its metrics
+ * JSON. SHADOW MODE: NEVER changes promotion or the composite.
+ *
+ * Build inputs are the cycle's S4+ survivors (the streams available in-memory).
+ * Until candidates actually survive, the collector is empty and the book stays
+ * empty — the machinery still runs and persists an empty book. Cross-cycle
+ * incubating candidates are not re-streamed here (their raw OOS paths are not
+ * persisted); the book is rebuilt each cycle from the freshest survivors.
+ *
+ * Call ONCE at the end of a cycle with the same collector used for the RC batch.
+ */
+export async function runBookBatch(
+  cx: ConvexHttpClient, collector: ShadowOosCollector, log: Log, ppy = 8760,
+): Promise<BookBatchResult> {
+  const cfg = await getAppConfig(cx);
+  if (!cfg.book.enabled) return { ran: false, nMembers: collector.length, note: "disabled" };
+
+  const streams: Stream[] = collector.map((c) => ({ id: c.candidateId, t: c.t, ret: c.ret }));
+  const book = buildBook(streams, ppy);
+
+  // persist the book singleton (best-effort)
+  try {
+    await cx.mutation(api.book.upsert, {
+      members: book.members.map((m, i) => ({
+        candidateId: streams[i]?.id ?? "?",
+        name: collector[i]?.name ?? "?",
+        weight: m.weight,
+        riskContrib: m.riskContrib,
+        standaloneSharpe: m.standaloneSharpe,
+      })),
+      weights: book.weights,
+      stats: book.stats,
+      meanAbsCorr: book.meanAbsCorr,
+    });
+  } catch (e) { log(`book upsert skipped: ${e instanceof Error ? e.message.slice(0, 80) : e}`); }
+
+  // per-survivor marginal contribution vs the OTHER members (leave-one-out), and
+  // shadow-persist marginalBookSharpe / maxBookCorr / bookQualifies onto metrics.
+  for (let i = 0; i < collector.length; i++) {
+    const candidate: Stream = streams[i];
+    const others = streams.filter((_, j) => j !== i);
+    const mc = marginalContribution(candidate, others, ppy);
+    const qualifies = bookQualifies(mc, { minMarginalSharpe: cfg.book.minMarginalSharpe, maxCorr: cfg.book.maxCorr });
+    try {
+      const cand = await cx.query(api.candidates.get, { id: collector[i].candidateId as Id<"candidates"> });
+      if (!cand) continue;
+      const m = cand.metrics ? JSON.parse(cand.metrics) : {};
+      m.marginalBookSharpe = mc.marginalSharpe;
+      m.maxBookCorr = mc.maxCorr;
+      m.bookQualifies = qualifies;
+      await cx.mutation(api.candidates.updateStage, { id: collector[i].candidateId as Id<"candidates">, stage: cand.stage, metrics: JSON.stringify(m) });
+      log(`shadow-book: "${collector[i].name}" marginalSharpe=${mc.marginalSharpe.toFixed(2)} maxCorr=${mc.maxCorr.toFixed(2)} qualifies=${qualifies ? "Y" : "N"}`);
+    } catch (e) { log(`book metric patch skipped: ${e instanceof Error ? e.message.slice(0, 80) : e}`); }
+  }
+
+  log(`shadow-book: ${book.members.length} members, bookSharpe=${book.stats.sharpe.toFixed(2)} meanAbsCorr=${book.meanAbsCorr.toFixed(2)} weights=[${book.weights.map((w) => w.toFixed(2)).join(", ")}]`);
+  return { ran: true, nMembers: book.members.length, bookSharpe: book.stats.sharpe, meanAbsCorr: book.meanAbsCorr };
 }

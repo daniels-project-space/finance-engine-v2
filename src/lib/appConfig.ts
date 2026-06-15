@@ -14,6 +14,84 @@ export interface AppConfig {
   killSwitch: { dailyDD: number; weeklyDD: number; monthlyDD: number };
   evo: { batchGp: number; batchFresh: number; batchLlm: number; maxCandidatesPerDay: number };
   llmDailyBudgetUsd: number;
+  /** SHADOW-RIGOR knobs. `compute` toggles the extra metrics; `bind` is RESERVED
+   *  for later and is IGNORED today — none of these ever change pass/fail yet.
+   *  Thresholds are the would-fail flag cut points (logged only). */
+  shadowRigor: {
+    compute: boolean;
+    bind: boolean;                 // legacy global flag (still ignored by the gauntlet)
+    pboBlocks: number;
+    pboWarnAt: number;
+    stabilityWarnAt: number;
+    regimeMinObs: number;
+    regimeMinSharpeWarnAt: number;
+    realityCheck: boolean;         // batch-level White RC over S4+ survivors
+    rcReps: number;
+    rcWarnAt: number;              // family-wise p above which best-candidate would-fail
+    // CALIBRATION PASS: PBO is now a BINDING gate when pbo.bind is true. A
+    // candidate with CSCV PBO >= pbo.max is rejected at/after S5.
+    pbo: { bind: boolean; max: number };
+    // CALIBRATION PASS: regime robustness is now a BINDING gate when regime.bind
+    // is true. A candidate fails if any regime with >= regime.minObs observations
+    // has Sharpe < regime.minSharpe, OR positive-PnL concentration exceeds
+    // regime.maxPnlConcentration (the regimeBreakdown concentration flag fires at
+    // > 0.8 today; maxPnlConcentration is kept for clarity/forward-compat).
+    regime: { bind: boolean; minObs: number; minSharpe: number; maxPnlConcentration: number };
+  };
+  /** CALIBRATION PASS: walk-forward leakage discipline. When purged is true the
+   *  binding S3/S4 path uses walkForwardPurged (purge+embargo) instead of the
+   *  leaky walkForward. Escape hatch: set purged:false to revert to the old WF. */
+  walkforward: { purged: boolean };
+  /** CALIBRATION PASS: IC-steered generation. When true, generation reads the
+   *  persisted signal-IC report and biases signal selection (GP grammar + LLM
+   *  prompt) toward high-IC signals. Cold-start safe (no report => uniform). */
+  icSteering: boolean;
+  /** CALIBRATION PASS: book-diversification promotion eligibility. When true a
+   *  book-qualifying candidate graduates to `eligible` even without a standalone
+   *  composite >= 1.1x champion. The APPROVAL gate is unchanged — champion swaps
+   *  on book grounds still wait for Daniel (auto-swap stays standalone-only). */
+  bookPromotion: boolean;
+  /** WAVE-2 SHADOW knobs. Both blocks are SHADOW-ONLY: computed + logged +
+   *  persisted additively, NEVER bound to promotion or the composite.
+   *  `enabled:false` skips the extra compute entirely. */
+  book: {
+    enabled: boolean;
+    /** marginal book-Sharpe gain at/above which a candidate qualifies on lift */
+    minMarginalSharpe: number;
+    /** max pairwise corr under which a positive candidate qualifies as a diversifier */
+    maxCorr: number;
+  };
+  capacity: {
+    enabled: boolean;
+    /** square-root impact coefficient k in cost = k*sigma*sqrt(participation) (~0.5-1.0) */
+    k: number;
+    /** capacity floor as a FRACTION of frictionless Sharpe (e.g. 0.5 = keep >=50%) */
+    capFloorFrac: number;
+    /** absolute capacity floor; the effective floor is max(abs, frac*frictionless) */
+    capFloorAbs: number;
+    /** reference AUM (USD) for impactAdjustedSharpe */
+    refAumUsd: number;
+    /** rolling window (bars) for the ADV notional proxy */
+    advWindow: number;
+  };
+  /** WAVE-3b generation knobs. premiumAnchoredGen flips the LLM lane to the
+   *  risk-premium-anchored prompt (mechanism-required). DEFAULT FALSE — the
+   *  legacy prompt is the untouched default. Premium TAGGING is always live. */
+  generation: {
+    premiumAnchoredGen: boolean;
+  };
+  /** WAVE-3b tuning knobs. bayesTuning swaps the random-search+hill-climb tuner
+   *  for the TPE Bayesian optimizer. DEFAULT FALSE — the legacy tuner is the
+   *  untouched default. bayes.* are the TPE hyperparameters. */
+  tuning: {
+    bayesTuning: boolean;
+    bayes: {
+      gamma: number;          // top-quantile fraction for the "good" set
+      nCandidates: number;    // EI candidate draws per ask
+      nStartup: number;       // random/jittered startup evals before the model kicks in
+      bandwidthFrac: number;  // KDE bandwidth as a fraction of each dimension's range
+    };
+  };
 }
 
 export const DEFAULT_CONFIG: AppConfig = {
@@ -30,13 +108,64 @@ export const DEFAULT_CONFIG: AppConfig = {
   // trickle for diversity only — the library seeds are the real fresh blood.
   evo: { batchGp: 18, batchFresh: 2, batchLlm: 4, maxCandidatesPerDay: 240 },
   llmDailyBudgetUsd: 1.0,
+  // SHADOW MODE: compute the honesty metrics and LOG would-fail flags, but never
+  // bind them. `bind` stays false until Daniel sets thresholds from real data.
+  shadowRigor: {
+    compute: true,
+    bind: false,
+    pboBlocks: 10,
+    pboWarnAt: 0.5,
+    stabilityWarnAt: 0.4,
+    regimeMinObs: 30,
+    regimeMinSharpeWarnAt: 0,
+    realityCheck: true,
+    rcReps: 1000,
+    rcWarnAt: 0.1,
+    // CALIBRATION PASS — NOW BINDING: reject overfit (PBO >= 0.6) at/after S5.
+    pbo: { bind: true, max: 0.6 },
+    // CALIBRATION PASS — NOW BINDING (lenient starting thresholds): reject a
+    // candidate that is broken in a well-populated regime (Sharpe < -0.5) or
+    // whose positive PnL is concentrated in one regime (>80%).
+    regime: { bind: true, minObs: 30, minSharpe: -0.5, maxPnlConcentration: 0.8 },
+  },
+  // CALIBRATION PASS — purged+embargoed walk-forward is now the binding S3/S4 WF.
+  walkforward: { purged: true },
+  // CALIBRATION PASS — IC-steered generation is ON.
+  icSteering: true,
+  // CALIBRATION PASS — book-diversification eligibility is ON (approval gate unchanged).
+  bookPromotion: true,
+  // WAVE-2 SHADOW: diversification book + capacity/impact. Computed and logged,
+  // never binding. Toggle off via {enabled:false} in the Convex config override.
+  book: {
+    enabled: true,
+    minMarginalSharpe: 0.1,
+    maxCorr: 0.6,
+  },
+  capacity: {
+    enabled: true,
+    k: 0.7,
+    capFloorFrac: 0.5,
+    capFloorAbs: 0.5,
+    refAumUsd: 100_000,
+    advWindow: 720,
+  },
+  // WAVE-3b: behavior flags DEFAULT FALSE — current live behavior is unchanged.
+  // Premium TAGGING (the label + premiumStats rollup) is live regardless; only
+  // the new anchored prompt and the Bayesian tuner are gated here.
+  generation: {
+    premiumAnchoredGen: true,
+  },
+  tuning: {
+    bayesTuning: true,
+    bayes: { gamma: 0.25, nCandidates: 24, nStartup: 8, bandwidthFrac: 0.12 },
+  },
 };
 
 export function mergeConfig(json: string | null): AppConfig {
   if (!json) return DEFAULT_CONFIG;
   try {
     const parsed = JSON.parse(json) as Partial<AppConfig>;
-    return { ...DEFAULT_CONFIG, ...parsed, floors: { ...DEFAULT_FLOORS, ...(parsed.floors ?? {}) }, killSwitch: { ...DEFAULT_CONFIG.killSwitch, ...(parsed.killSwitch ?? {}) }, evo: { ...DEFAULT_CONFIG.evo, ...(parsed.evo ?? {}) } };
+    return { ...DEFAULT_CONFIG, ...parsed, floors: { ...DEFAULT_FLOORS, ...(parsed.floors ?? {}) }, killSwitch: { ...DEFAULT_CONFIG.killSwitch, ...(parsed.killSwitch ?? {}) }, evo: { ...DEFAULT_CONFIG.evo, ...(parsed.evo ?? {}) }, shadowRigor: { ...DEFAULT_CONFIG.shadowRigor, ...(parsed.shadowRigor ?? {}), pbo: { ...DEFAULT_CONFIG.shadowRigor.pbo, ...(parsed.shadowRigor?.pbo ?? {}) }, regime: { ...DEFAULT_CONFIG.shadowRigor.regime, ...(parsed.shadowRigor?.regime ?? {}) } }, book: { ...DEFAULT_CONFIG.book, ...(parsed.book ?? {}) }, capacity: { ...DEFAULT_CONFIG.capacity, ...(parsed.capacity ?? {}) }, walkforward: { ...DEFAULT_CONFIG.walkforward, ...(parsed.walkforward ?? {}) }, generation: { ...DEFAULT_CONFIG.generation, ...(parsed.generation ?? {}) }, tuning: { ...DEFAULT_CONFIG.tuning, ...(parsed.tuning ?? {}), bayes: { ...DEFAULT_CONFIG.tuning.bayes, ...(parsed.tuning?.bayes ?? {}) } } };
   } catch {
     return DEFAULT_CONFIG;
   }
