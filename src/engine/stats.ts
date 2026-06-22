@@ -67,15 +67,38 @@ export function psr(ret: Float64Array, from: number, to: number, srBenchmarkPerP
 
 /**
  * Deflated Sharpe Ratio: PSR against the expected max SR of nTrials independent
- * trials (multiple-testing deflation). varTrialsSR = cross-sectional variance of
- * per-period SRs across trials (estimate; default conservative 0.001 ~ typical
- * dispersion of hourly-strategy SRs).
+ * trials (multiple-testing deflation). Bailey & Lopez de Prado (2014).
+ *
+ * UNITS FIX (2026-06-23): psr() works in PER-BAR Sharpe units (sr = mean/sd over
+ * `ppy` bars/year, with the n-bar standard-error term sqrt(n-1)). The deflation
+ * benchmark sr0 must therefore also be PER-BAR. The trial-Sharpe dispersion is
+ * naturally quoted ANNUALIZED (a typical cross-sectional std of strategy Sharpes
+ * is ~0.5/yr), so we accept `varTrialsSRAnnual` in annualized units and convert
+ * to per-bar variance by dividing by ppy (sr_perbar = sr_annual / sqrt(ppy) =>
+ * var_perbar = var_annual / ppy). The old code used 0.001 as if it were already
+ * per-bar but it was effectively annual-scaled, so sqrt(0.001)=0.0316 dwarfed
+ * every real strategy's per-bar Sharpe (annual SR 3.0 ~ 0.032/bar on 1h data) and
+ * collapsed DSR to 0 for ALL candidates regardless of merit — an impassable gate.
+ *
+ * varTrialsSRAnnual default 0.25 (annual SR std 0.5): defensible cross-sectional
+ * dispersion of trial Sharpes. Acceptance-verified curve at N=40: SR 0.5 fails,
+ * SR ~1.0-1.2 borderline, SR 2.0+ passes; bar rises with nTrials. Empirical
+ * per-family variance is preferred but not yet plumbed to the gate (fingerprints
+ * store no Sharpe), so this conservative default stands until that data exists.
  */
-export function dsr(ret: Float64Array, from: number, to: number, nTrials: number, varTrialsSR = 0.001): number {
+export function dsr(
+  ret: Float64Array,
+  from: number,
+  to: number,
+  nTrials: number,
+  ppy: number,
+  varTrialsSRAnnual = 0.25,
+): number {
   const EULER = 0.5772156649015329;
   const N = Math.max(2, nTrials);
   const e = Math.E;
-  const sr0 = Math.sqrt(varTrialsSR) * ((1 - EULER) * normInv(1 - 1 / N) + EULER * normInv(1 - 1 / (N * e)));
+  const varTrialsSRPerBar = varTrialsSRAnnual / Math.max(1, ppy); // annualized -> per-bar, matches psr() units
+  const sr0 = Math.sqrt(varTrialsSRPerBar) * ((1 - EULER) * normInv(1 - 1 / N) + EULER * normInv(1 - 1 / (N * e)));
   return psr(ret, from, to, sr0);
 }
 

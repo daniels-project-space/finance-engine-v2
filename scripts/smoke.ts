@@ -229,7 +229,7 @@ async function main() {
   check("WF train/test never overlap seal", nullWf.windows.every((w) => w.testStartTs > w.trainStartTs));
 
   console.log("— statistics —");
-  const d = dsr(res.ret, 2, bars.c.length - 1, 100);
+  const d = dsr(res.ret, 2, bars.c.length - 1, 100, 8760);
   check("dsr in [0,1]", d >= 0 && d <= 1, `${d}`);
   const t0 = Date.now();
   const perm = permutationTest(emaCross, synthBars(8000), { fast: 20, slow: 100 }, opts, res.metrics.sharpe, 20);

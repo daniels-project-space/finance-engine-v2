@@ -372,7 +372,7 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
   metrics.fullTrades = full.metrics.trades;
   metrics.exposure = full.metrics.exposure;
   curves.full = downsampleCurve(primary.t, full.equity, 1, devEndI, 300);
-  const d = dsr(full.ret, 2, devEndI, Math.max(g.nTrialsTotal, 10));
+  const d = dsr(full.ret, 2, devEndI, Math.max(g.nTrialsTotal, 10), opts.ppy);
   metrics.dsr = d;
   if (d < floors.minDSR) return fail("S5-stats", `DSR ${d.toFixed(3)} < ${floors.minDSR} (deflated for ${g.nTrialsTotal} trials)`, started, { dsr: d });
   const perm = permutationTest(doc, sliceBars(primary, 0, devEndI), finalParams, opts, full.metrics.sharpe, 120);
