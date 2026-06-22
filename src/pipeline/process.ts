@@ -352,7 +352,23 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   const primaryAlt = await loadBars(cfg.primarySymbol, altTf);
   if (primaryAlt && primaryAlt.t.length > (PPY[altTf] ?? 8760) * 1.7) others.push(primaryAlt);
 
-  const nTrials = await cx.query(api.pipeline.getCounter, { key: "trials_total" });
+  // DSR TRIAL-SCOPE FIX (2026-06-23): the Deflated-Sharpe N must be the number of
+  // trials in the SAME selection process that produced THIS candidate — i.e. the
+  // structurally-equivalent strategy variants explored within its family — NOT a
+  // lifetime monotonic count of every unrelated strategy the engine has ever run.
+  // The old all-time `trials_total` (~2000) inflated the deflation benchmark sr0
+  // without bound, collapsing every candidate's DSR to ~0 regardless of merit, so
+  // the S5 gate had become a wall no strategy could pass (Bailey & Lopez de Prado
+  // define N as the breadth of the search that selected the candidate). We scope N
+  // to the candidate's structural family (fingerprints sharing familyHash) and
+  // floor it at the per-strategy parameter-search breadth (~tuneTrials) so even a
+  // first-of-family is still honestly deflated for its own optimization. minDSR
+  // (0.95) and every other floor are UNCHANGED — this corrects N, not the bar.
+  const DSR_MIN_FAMILY_TRIALS = 40; // grounds singleton families in their own WF tuning breadth (tuneTrials 25-40)
+  const familyTrials = await cx.query(api.candidates.familySeenCount, { familyHash: cand.familyHash });
+  const nTrials = Math.max(familyTrials, DSR_MIN_FAMILY_TRIALS);
+  // keep the lifetime counter as telemetry only (read by monitor/analytics); it no
+  // longer feeds DSR deflation.
   await cx.mutation(api.pipeline.bumpCounter, { key: "trials_total", by: 1 });
 
   const report = runGauntlet({
