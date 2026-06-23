@@ -3,7 +3,7 @@
 // engine's "walk-forward" never re-tuned — this one does, by construction.
 
 import { runBacktest, computeMetrics, indexOfTs } from "./backtest";
-import { tune } from "./tune";
+import { tune, type CoSymbol } from "./tune";
 import type { BacktestOpts, Bars, StrategyDoc } from "./types";
 
 export interface WfWindow {
@@ -30,7 +30,9 @@ export function walkForward(
   doc: StrategyDoc,
   bars: Bars,
   opts: BacktestOpts,
-  cfg: { trainMonths?: number; stepMonths?: number; minWindows?: number; tuneTrials?: number; endTs?: number } = {},
+  // MULTI-SYMBOL TUNING: `cosymbols`, when present, makes the per-window re-tune
+  // select params that generalize across {bars, ...cosymbols} (see tune.ts).
+  cfg: { trainMonths?: number; stepMonths?: number; minWindows?: number; tuneTrials?: number; endTs?: number; cosymbols?: CoSymbol[] } = {},
 ): WfReport {
   const trainMs = (cfg.trainMonths ?? 12) * MS_30D;
   const stepMs = (cfg.stepMonths ?? 1) * MS_30D;
@@ -54,7 +56,7 @@ export function walkForward(
     const minTrainBars = Math.max(100, Math.floor(0.4 * (cfg.trainMonths ?? 12) * (opts.ppy / 12)));
     if (testEndI <= testStartI + 8 || trainEndI - trainStartI < minTrainBars) { testStart += stepMs; continue; }
 
-    const fit = tune(doc, bars, opts, { startI: trainStartI, endI: trainEndI }, cfg.tuneTrials ?? 40, 1000 + wi);
+    const fit = tune(doc, bars, opts, { startI: trainStartI, endI: trainEndI }, cfg.tuneTrials ?? 40, 1000 + wi, cfg.cosymbols);
     // run from train start so indicators are warm, but score only the test slice
     const res = runBacktest(doc, bars, fit.params, opts, { startI: trainStartI, endI: testEndI });
     let s = 0, sq = 0, g = 1, trades = 0;
@@ -110,7 +112,7 @@ export function walkForwardPurged(
   opts: BacktestOpts,
   cfg: {
     trainMonths?: number; stepMonths?: number; tuneTrials?: number; endTs?: number;
-    purgeWindow?: number; embargo?: number;
+    purgeWindow?: number; embargo?: number; cosymbols?: CoSymbol[];
   } = {},
 ): WfReport & { purgeWindow: number; embargo: number } {
   const trainMs = (cfg.trainMonths ?? 12) * MS_30D;
@@ -143,7 +145,7 @@ export function walkForwardPurged(
     const minTrainBars = Math.max(100, Math.floor(0.4 * (cfg.trainMonths ?? 12) * (opts.ppy / 12)));
     if (testEndI <= testStartI + 8 || trainEndI - trainStartI < minTrainBars) { testStart += stepMs; continue; }
 
-    const fit = tune(doc, bars, opts, { startI: trainStartI, endI: trainEndI }, cfg.tuneTrials ?? 40, 1000 + wi);
+    const fit = tune(doc, bars, opts, { startI: trainStartI, endI: trainEndI }, cfg.tuneTrials ?? 40, 1000 + wi, cfg.cosymbols);
     // warm indicators from the (purged) train start, score only the test slice
     const res = runBacktest(doc, bars, fit.params, opts, { startI: trainStartI, endI: testEndI });
     let s = 0, sq = 0, g = 1, trades = 0;

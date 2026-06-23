@@ -13,7 +13,7 @@
 import { indexOfTs, runBacktest } from "./backtest";
 import { bootstrapSharpeCI, dsr, permutationTest } from "./stats";
 import { runStress, type StressReport } from "./stress";
-import { adaptiveTrials, tune, tuneWithConfigs } from "./tune";
+import { adaptiveTrials, tune, tuneWithConfigs, type CoSymbol } from "./tune";
 import { walkForward, walkForwardPurged, type WfReport } from "./walkforward";
 import { validateStrategy } from "./dsl";
 import { computePbo, paramStability, suggestEmbargo } from "./rigor";
@@ -283,15 +283,35 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
   const usePurged = g.binding?.purgedWf === true;
   const wfLookback = maxIndicatorLookback(doc, fit.params);
   const wfEmbargo = suggestEmbargo(devEndI, wfLookback);
-  const runWf = (bars: Bars, oOpts: ReturnType<typeof optsFor>, c: { trainMonths: number; stepMonths: number; tuneTrials: number; endTs: number }): WfReport =>
+
+  // ---- MULTI-SYMBOL TUNING SUBSET (root fix, 2026-06-23) -------------------
+  // Param selection inside the S3/S4 re-tuning now optimises for cross-symbol
+  // robustness, not BTC-primary alone, so params are no longer BTC-overfit by
+  // construction (cross-symbol used to be seen only at S4 — too late to steer).
+  // COMPUTE: each tune eval runs ~(1+|subset|) backtests, so we tune on a 2-symbol
+  // SAME-TF subset (3 series/eval) and let S4 validate on ALL 5 — keeping cost ~3x
+  // per eval rather than 5-6x. We also trim the tune-trial budget (S3 40->26, S4
+  // 25->16) so net wall-time stays ~1.5-2x the old single-symbol cost instead of
+  // 3x. Subset = the first up-to-2 same-tf "others"; if none exist (no panel),
+  // cosymbols is empty and behaviour is exactly the legacy single-symbol tune.
+  const sameTfOthers = g.others.filter((b) => b.tf === primary.tf);
+  const tuneSubset: CoSymbol[] = sameTfOthers.slice(0, 2).map((b) => ({ bars: b, opts: optsFor(b.symbol, b.tf) }));
+  const MS_TUNE = tuneSubset.length > 0;
+  g.log?.(`multi-symbol tuning: ${MS_TUNE ? `${tuneSubset.length + 1} symbols (primary + ${tuneSubset.length} subset)` : "off (no same-tf panel)"}`);
+
+  // runWf: when `co` is passed, the per-window re-tune selects cross-symbol-robust
+  // params; the WF is still SCORED on its own `bars` (single-symbol OOS), so every
+  // S3/S4 floor reads the same metric as before — only param SELECTION changed.
+  const runWf = (bars: Bars, oOpts: ReturnType<typeof optsFor>, c: { trainMonths: number; stepMonths: number; tuneTrials: number; endTs: number }, co?: CoSymbol[]): WfReport =>
     usePurged
-      ? walkForwardPurged(doc, bars, oOpts, { ...c, purgeWindow: wfLookback, embargo: wfEmbargo })
-      : walkForward(doc, bars, oOpts, c);
+      ? walkForwardPurged(doc, bars, oOpts, { ...c, purgeWindow: wfLookback, embargo: wfEmbargo, cosymbols: co })
+      : walkForward(doc, bars, oOpts, { ...c, cosymbols: co });
   if (usePurged) g.log?.(`WF=purged purge=${wfLookback} embargo=${wfEmbargo}`);
 
   // ---- S3 walk-forward with re-tuning (pre-seal only) ---------------------
   started = t0();
-  const wf = runWf(primary, opts, { trainMonths: 12, stepMonths: 1, tuneTrials: 40, endTs: g.sealTs });
+  // S3 tunes the PRIMARY but selects params robust across the subset (multi-symbol).
+  const wf = runWf(primary, opts, { trainMonths: 12, stepMonths: 1, tuneTrials: MS_TUNE ? 26 : 40, endTs: g.sealTs }, tuneSubset);
   metrics.wfPooledSharpe = wf.pooledSharpe;
   metrics.wfPctPositive = wf.pctPositive;
   metrics.wfWorstMonth = wf.worstWindowRet;
@@ -340,7 +360,14 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
   for (const other of g.others) {
     const oOpts = optsFor(other.symbol, other.tf);
     const samePane = other.tf === primary.tf;
-    const owf = runWf(other, oOpts, { trainMonths: 12, stepMonths: samePane ? 1 : 2, tuneTrials: 25, endTs: g.sealTs });
+    // Each per-symbol WF also selects cross-symbol-robust params: tune `other`
+    // against the PRIMARY + one same-tf peer (excluding `other` itself), so a
+    // per-symbol WF can't converge to an `other`-only overfit. Cross-tf panes get
+    // an empty subset (different ppy/window scaling) => legacy single-symbol tune.
+    const oCo: CoSymbol[] = samePane
+      ? [{ bars: primary, opts }, ...sameTfOthers.filter((b) => b.symbol !== other.symbol).slice(0, 1).map((b) => ({ bars: b, opts: optsFor(b.symbol, b.tf) }))]
+      : [];
+    const owf = runWf(other, oOpts, { trainMonths: 12, stepMonths: samePane ? 1 : 2, tuneTrials: (samePane && oCo.length) ? 16 : 25, endTs: g.sealTs }, oCo);
     perSymbol[`${other.symbol}@${other.tf}`] = owf.pooledSharpe;
     if (owf.pooledSharpe > 0 && owf.pctPositive >= 0.5) positive++;
     if (samePane) portStreams.push({ t: owf.pooledT, ret: owf.pooledRet });

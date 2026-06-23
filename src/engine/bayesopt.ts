@@ -13,9 +13,8 @@
 // consumes this). Wired in behind the DEFAULT-FALSE `bayesTuning` flag; when off,
 // the legacy tuner in tune.ts is used unchanged.
 
-import { runBacktest } from "./backtest";
 import { mulberry32 } from "./stats";
-import { objective, type TuneResult } from "./tune";
+import { makeEvaluate, type CoSymbol, type TuneResult } from "./tune";
 import type { BacktestOpts, Bars, StrategyDoc } from "./types";
 
 interface Dim {
@@ -218,14 +217,12 @@ export function bayesTune(
   nTrials = 60,
   seed = 11,
   cfg?: BayesConfig,
+  cosymbols?: CoSymbol[],
 ): BayesOptResult {
-  const evaluate = (params: Record<string, number>) => {
-    const res = runBacktest(doc, bars, params, opts, range);
-    return {
-      objective: objective(res.metrics.sharpe, res.metrics.trades),
-      sharpe: res.metrics.sharpe,
-      trades: res.metrics.trades,
-    };
-  };
+  // MULTI-SYMBOL TUNING: makeEvaluate returns the cross-symbol-robust objective
+  // when cosymbols are supplied (else the exact legacy single-symbol objective).
+  // The TPE loop is objective-agnostic, so the optimizer now selects params that
+  // generalize across perps without any change to its mechanics.
+  const evaluate = makeEvaluate(doc, bars, opts, range, cosymbols);
   return bayesOptimize({ doc, evaluate, nTrials, seed, cfg });
 }
