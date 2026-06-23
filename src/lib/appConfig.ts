@@ -60,6 +60,24 @@ export interface AppConfig {
     minMarginalSharpe: number;
     /** max pairwise corr under which a positive candidate qualifies as a diversifier */
     maxCorr: number;
+    /** BOOK-MARGINAL PROMOTION GATE (bookGate.ts). When `marginalGate` is true, a
+     *  candidate that FAILS the standalone S5-DSR hurdle but passes the relaxed
+     *  per-sleeve significance AND is marginally book-accretive is routed to
+     *  incubation as a BOOK SLEEVE — but ONLY if the whole book then clears the
+     *  book-level honesty bar (C). Default FALSE here; we ship it ON via the live
+     *  config override as a READY RECEIVER (promotes nothing until a book clears C).
+     *  The A/B/C knobs below tune the gate. */
+    marginalGate: boolean;
+    /** (A) relaxed per-sleeve: bootstrap CI lower bound must exceed this */
+    sleeveMinBootLo: number;
+    /** (A) relaxed per-sleeve: deflated Sharpe (bootstrap p5) must be >= this */
+    sleeveMinDeflated: number;
+    /** (C) book-level: book OOS Sharpe must be >= this */
+    bookMinSharpe: number;
+    /** (C) book-level: book deflated Sharpe (p5) must be >= this */
+    bookMinDeflated: number;
+    /** (C) book-level: mean |off-diagonal correlation| must be <= this */
+    bookMaxMeanCorr: number;
   };
   capacity: {
     enabled: boolean;
@@ -140,6 +158,17 @@ export const DEFAULT_CONFIG: AppConfig = {
     enabled: true,
     minMarginalSharpe: 0.1,
     maxCorr: 0.6,
+    // BOOK-MARGINAL GATE defaults. marginalGate=false here; shipped ON via the
+    // live Convex override as a ready receiver. A/B/C knobs match the reviewed
+    // spec: per-sleeve bootstrap-CI-lo>0 + deflated(p5)>=0; book-level Sharpe>=1.0,
+    // deflated(p5)>=1.0, meanAbsCorr<=0.5. These PROMOTE NOTHING until a genuinely
+    // diversified book clears level-C.
+    marginalGate: false,
+    sleeveMinBootLo: 0,
+    sleeveMinDeflated: 0,
+    bookMinSharpe: 1.0,
+    bookMinDeflated: 1.0,
+    bookMaxMeanCorr: 0.5,
   },
   capacity: {
     enabled: true,

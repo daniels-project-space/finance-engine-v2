@@ -242,9 +242,15 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
   const metrics: GauntletReport["metrics"] = {};
   const t0 = () => Date.now();
   const curves: GauntletReport["curves"] = {};
+  // BOOK-GATE SUPPORT: once S4 builds the deployed-portfolio OOS stream we carry
+  // it so even a candidate that FAILS the standalone S5 hurdle still exposes its
+  // OOS stream — the book-marginal gate evaluates these as candidate book sleeves
+  // (a genuinely-positive 0.7-0.9 sleeve is a good book component even if it fails
+  // 1.9 standalone). Pre-S4 failures carry nothing (no portfolio yet).
+  let portCarry: { t: number[]; ret: number[] } | undefined;
   const fail = (stage: string, reason: string, started: number, detail?: unknown): GauntletReport => {
     stages.push({ stage, passed: false, reason, detail, durationMs: Date.now() - started });
-    return { passed: false, failedStage: stage, failedReason: reason, stages, metrics, curves };
+    return { passed: false, failedStage: stage, failedReason: reason, stages, metrics, curves, portfolioOos: portCarry };
   };
 
   const { doc, primary, floors } = g;
@@ -381,6 +387,10 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
   metrics.portPctPositive = ps.pctPositive;
   metrics.portMaxDD = ps.maxDD;
   curves.port = downsampleCurve(port.t, ps.equity, 0, port.t.length - 1, 240);
+  // carry the raw deployed-portfolio OOS stream so S4-portfolio/S5+ failures still
+  // expose it to the book-marginal gate (a weak-but-uncorrelated sleeve is a valid
+  // book candidate even though it fails the standalone hurdle). Array<-Float64.
+  portCarry = { t: Array.from(port.t, Number), ret: Array.from(port.ret, Number) };
   if (ps.sharpe < floors.portMinSharpe) return fail("S4-portfolio", `portfolio OOS sharpe ${ps.sharpe.toFixed(2)} < ${floors.portMinSharpe}`, started, { ...perSymbol, portfolio: ps.sharpe });
   if (ps.pctPositive < floors.portMinPctPositive) return fail("S4-portfolio", `portfolio ${(ps.pctPositive * 100).toFixed(0)}% positive months < ${floors.portMinPctPositive * 100}%`, started, { ...perSymbol, portfolio: ps.sharpe, pctPositive: ps.pctPositive });
   if (ps.worstMonth < floors.portWorstMonth) return fail("S4-portfolio", `portfolio worst month ${(ps.worstMonth * 100).toFixed(1)}% < ${floors.portWorstMonth * 100}%`, started, { ...perSymbol, portfolio: ps.sharpe, worstMonth: ps.worstMonth });

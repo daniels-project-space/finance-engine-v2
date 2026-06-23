@@ -6,15 +6,16 @@ import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { mergeConfig, todayKey, type AppConfig } from "../lib/appConfig";
 import { loadBars } from "../lib/data";
-import { artifactKey, putJsonGz } from "../lib/storage";
+import { artifactKey, putJsonGz, getJsonGz } from "../lib/storage";
 import { canonicalHash, familyHash, validateStrategy } from "../engine/dsl";
 import { crossoverStrategies, mutateStrategy, randomStrategy, recipeOf, setIcBias, MUTATION_OPS, type MutationHint, type MutationOp } from "../engine/evolve";
 import { icFamilyWeights, icRankingText, type IcRankedRow } from "../engine/signals";
 import { SEED_LIBRARY } from "../engine/library";
 import { IMPORTED_LIBRARY } from "../engine/imports";
-import { evaluateSealed, runGauntlet } from "../engine/gauntlet";
+import { evaluateSealed, runGauntlet, type GauntletReport } from "../engine/gauntlet";
 import { realityCheck } from "../engine/rigor";
 import { buildBook, marginalContribution, bookQualifies, type Stream } from "../engine/book";
+import { perSleeveSignificant, marginalAdmits, bookLevelGate } from "../engine/bookGate";
 import { propose } from "../engine/llm";
 import { premiumOf } from "../engine/premia";
 import { setBayesTuning } from "../engine/tune";
@@ -432,6 +433,32 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   const curvesJson = (extra?: object) => JSON.stringify({ ...(report.curves ?? {}), ...(extra ?? {}) });
 
   if (!report.passed) {
+    // ---- BOOK-MARGINAL PROMOTION GATE (ready receiver) ----------------------
+    // A candidate that FAILED the standalone S5-DSR hurdle is not necessarily
+    // worthless: a genuinely-positive, low-correlation sleeve is a good BOOK
+    // component (n uncorrelated sleeves ~ sqrt(n) book Sharpe). When marginalGate
+    // is on, we evaluate exactly such a candidate against the persistent admitted
+    // book: (A) relaxed-but-real per-sleeve significance, (B) marginal book
+    // accretion + correlation cap, (C) the WHOLE book must clear the book-level
+    // honesty bar. ONLY if (A)&(B)&(C) all pass do we admit + route to incubation.
+    // No gauntlet floor is touched; sealed holdout + paper stay downstream. Today
+    // this PROMOTES NOTHING (no diversified book clears level-C) — it is live and
+    // ready for when uncorrelated sleeves arrive.
+    if (
+      cfg.book.marginalGate &&
+      report.failedStage === "S5-stats" &&
+      (report.failedReason ?? "").startsWith("DSR") &&
+      report.portfolioOos && report.portfolioOos.ret.length >= 100
+    ) {
+      try {
+        const admitted = await bookGatePromote(cx, cand, candidateId, report, cfg, ppy, log);
+        if (admitted) {
+          await finalizeLedger("incubating", report.metrics.portOosSharpe);
+          return { passed: true, composite: report.metrics.portOosSharpe };
+        }
+      } catch (e) { log(`book-gate skipped: ${e instanceof Error ? e.message.slice(0, 100) : e}`); }
+    }
+
     // partial composite so near-misses still rank in the tournament
     const wfScore = report.metrics.portOosSharpe ?? report.metrics.wfPooledSharpe;
     const partial = wfScore !== undefined
@@ -638,4 +665,75 @@ export async function runBookBatch(
 
   log(`shadow-book: ${book.members.length} members, bookSharpe=${book.stats.sharpe.toFixed(2)} meanAbsCorr=${book.meanAbsCorr.toFixed(2)} weights=[${book.weights.map((w) => w.toFixed(2)).join(", ")}]`);
   return { ran: true, nMembers: book.members.length, bookSharpe: book.stats.sharpe, meanAbsCorr: book.meanAbsCorr };
+}
+
+// ------------------------------------------------ BOOK-MARGINAL PROMOTION GATE
+/** Persistent admitted-book streams live in R2 under this stable key. Each entry
+ *  is one admitted sleeve's deployed-portfolio OOS stream {id,name,t,ret}. */
+const ADMITTED_BOOK_KEY = artifactKey("book", "admitted");
+type AdmittedSleeve = { id: string; name: string; t: number[]; ret: number[] };
+
+/**
+ * Evaluate an S5-DSR-failed candidate (with a valid portfolio OOS stream) as a
+ * BOOK SLEEVE: (A) relaxed-but-real per-sleeve significance, (B) marginal
+ * accretion + correlation cap vs the persistent admitted book, (C) the WHOLE
+ * resulting book must clear the book-level honesty bar. Returns true (and routes
+ * the candidate to incubation + persists the enlarged admitted book) ONLY when
+ * all three pass — otherwise false (caller falls through to normal failure).
+ * Touches NO gauntlet floor. Promotes nothing until a diversified book clears C.
+ */
+async function bookGatePromote(
+  cx: ConvexHttpClient,
+  cand: { name: string; hypothesis: string; source: string; hash: string },
+  candidateId: Id<"candidates">,
+  report: GauntletReport,
+  cfg: AppConfig,
+  ppy: number,
+  log: Log,
+): Promise<boolean> {
+  const oos = report.portfolioOos!;
+  const b = cfg.book;
+  // (A) relaxed-but-real per-sleeve significance (bootstrap + deflated from the
+  // stream; permutation/PBO unavailable on a DSR-early-exit, so we rely on the
+  // self-contained bootstrap/deflated tests, which already reject noise).
+  const A = perSleeveSignificant(
+    { ret: Float64Array.from(oos.ret), ppy, nTrials: 40, permP: report.metrics.permutationP, pbo: report.metrics.pbo },
+    { minBootLo: b.sleeveMinBootLo, minDeflatedSharpe: b.sleeveMinDeflated, maxPermP: cfg.floors.maxPermutationP, maxPbo: 0.5 },
+  );
+  if (!A.passes) { log(`book-gate (A) reject "${cand.name}": ${A.reasons.join("; ")}`); return false; }
+
+  // load the persistent admitted book streams from R2 (empty on first ever pass)
+  const admitted = (await getJsonGz<AdmittedSleeve[]>(ADMITTED_BOOK_KEY)) ?? [];
+  const memberStreams: Stream[] = admitted.map((a) => ({ id: a.id, t: a.t, ret: Float64Array.from(a.ret) }));
+  const candStream: Stream = { id: candidateId as string, t: oos.t, ret: Float64Array.from(oos.ret) };
+
+  // (B) marginal accretion + correlation cap
+  const B = marginalAdmits(candStream, memberStreams, ppy, { minMarginalSharpe: b.minMarginalSharpe, maxCorr: b.maxCorr });
+  if (!B.admits) { log(`book-gate (B) reject "${cand.name}": ${B.reason}`); return false; }
+
+  // (C) the WHOLE prospective book must clear the book-level honesty bar
+  const prospective = [...memberStreams, candStream];
+  const C = bookLevelGate(prospective, ppy, prospective.length, {
+    minBookSharpe: b.bookMinSharpe, minBookDeflatedSharpe: b.bookMinDeflated, maxMeanAbsCorr: b.bookMaxMeanCorr,
+  });
+  log(`book-gate "${cand.name}": A=pass B=${B.reason} | book(${C.nMembers}) sharpe=${C.bookSharpe.toFixed(2)} deflated=${C.bookDeflatedSharpe.toFixed(2)} divRatio=${C.diversificationRatio.toFixed(2)} meanCorr=${C.meanAbsCorr.toFixed(2)} -> C=${C.passes ? "PASS" : "FAIL"}${C.passes ? "" : " (" + C.reasons.join("; ") + ")"}`);
+  if (!C.passes) return false;
+
+  // ---- ADMIT: persist the enlarged book + route to paper incubation ----------
+  const newAdmitted: AdmittedSleeve[] = [...admitted, { id: candidateId as string, name: cand.name, t: oos.t, ret: oos.ret }];
+  await putJsonGz(ADMITTED_BOOK_KEY, newAdmitted);
+  const metrics = { ...report.metrics, bookAdmitted: 1, bookSharpe: C.bookSharpe, bookDeflated: C.bookDeflatedSharpe, bookDivRatio: C.diversificationRatio, marginalBookSharpe: B.marginal.marginalSharpe, maxBookCorr: B.marginal.maxCorr };
+  await cx.mutation(api.paper.ensureAccount, { candidateId, startEquity: cfg.paperStartEquity });
+  await cx.mutation(api.candidates.updateStage, {
+    id: candidateId, stage: "incubating",
+    metrics: JSON.stringify(metrics), bestParams: JSON.stringify(report.bestParams ?? {}),
+    curves: JSON.stringify(report.curves ?? {}),
+    composite: report.metrics.portOosSharpe, incubationStartedAt: Date.now(),
+  });
+  await cx.mutation(api.pipeline.addLesson, {
+    source: cand.source, candidateId,
+    text: `BOOK-ADMITTED: "${cand.name}" failed standalone S5-DSR but joined the diversified book (book Sharpe ${C.bookSharpe.toFixed(2)}, deflated ${C.bookDeflatedSharpe.toFixed(2)}, divRatio ${C.diversificationRatio.toFixed(2)}, ${C.nMembers} sleeves). Entered 30-day paper incubation as a book component.`,
+  });
+  log(`BOOK-ADMITTED -> incubating: "${cand.name}" (book now ${C.nMembers} sleeves, Sharpe ${C.bookSharpe.toFixed(2)})`);
+  return true;
 }
