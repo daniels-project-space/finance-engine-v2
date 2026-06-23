@@ -3,6 +3,14 @@ import { DEFAULT_FLOORS, type GateFloors } from "../engine/types";
 
 export interface AppConfig {
   universe: string[];
+  /** S4 cross-symbol validation subset (representative large/mid cap). When unset
+   *  a built-in default is used. Caps the per-symbol S4 loop so a ~24-coin universe
+   *  doesn't blow the gauntletTask time budget. Does NOT change S4 floor values. */
+  crossSymbolSubset?: string[];
+  /** CROSS-SECTIONAL generation lane (trend + carry, long-flat). When enabled,
+   *  generateBatch proposes `perCycle` universe-wide rank sleeves that route to
+   *  the adapted gauntlet (S4 skipped) + the book gate. */
+  xsection?: { enabled: boolean; perCycle?: number };
   primarySymbol: string;
   tf: string;
   /** ISO date string; data >= sealDate is sealed (S6 one-shot only) */
@@ -114,6 +122,8 @@ export interface AppConfig {
 
 export const DEFAULT_CONFIG: AppConfig = {
   universe: ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"],
+  // cross-sectional lane DEFAULT OFF in code; shipped ON via the live override.
+  xsection: { enabled: false, perCycle: 4 },
   primarySymbol: "BTC/USDT",
   tf: "1h",
   sealDate: "2026-02-01",

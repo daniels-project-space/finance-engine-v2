@@ -8,6 +8,8 @@ import { mutateStrategy, randomStrategy } from "../src/engine/evolve";
 import { dsr, mulberry32, permutationTest } from "../src/engine/stats";
 import { walkForward } from "../src/engine/walkforward";
 import type { Bars, StrategyDoc } from "../src/engine/types";
+import { generateXSection, validateXSection } from "../src/engine/xsectionGen";
+import { alignUniverse, backtestXSection, isXSection } from "../src/engine/xsection";
 
 let failures = 0;
 function check(name: string, cond: boolean, info = "") {
@@ -234,6 +236,29 @@ async function main() {
   const t0 = Date.now();
   const perm = permutationTest(emaCross, synthBars(8000), { fast: 20, slow: 100 }, opts, res.metrics.sharpe, 20);
   check("permutation test runs", perm.p > 0 && perm.p <= 1, `p=${perm.p} in ${Date.now() - t0}ms`);
+
+  console.log("— cross-sectional lane —");
+  // build a synthetic 8-coin universe (shared timestamps, varied trends)
+  const xsBarsList = Array.from({ length: 8 }, (_, k) => {
+    const b = synthBars(6000, 100 + k, 0.0006 * (1 + (k % 3)));
+    return { symbol: `C${k}/USDT`, bars: { ...b, symbol: `C${k}/USDT`, tf: "4h", fundingT: [], fundingR: [] } as Bars };
+  });
+  const A = alignUniverse(xsBarsList);
+  check("xsection universe aligns", A.t.length > 1000 && A.symbols.length === 8, `bars=${A.t.length} coins=${A.symbols.length}`);
+  const xdoc = generateXSection(42, "trend");
+  check("xsection doc valid + long-flat", validateXSection(xdoc).length === 0 && xdoc.side === "long-flat" && isXSection(xdoc), JSON.stringify(validateXSection(xdoc)));
+  const xbt = backtestXSection(xdoc, A, { topK: xdoc.topK, rebalEvery: xdoc.rebalEvery }, 2190, { startI: xdoc.lookback + 1, endI: A.t.length - 1 });
+  check("xsection backtest runs", Number.isFinite(xbt.ret[A.t.length - 1]) && xbt.nRebal > 5, `nRebal=${xbt.nRebal}`);
+  // LOOK-AHEAD PROBE: corrupt all bars AFTER mid; returns on [0,mid] must be unchanged
+  const mid = Math.floor(A.t.length * 0.5);
+  const A2 = { ...A, close: A.close.map((c) => c.slice()), ret: A.ret.map((r) => r.slice()), inp: A.inp.map((x) => ({ ...x, c: x.c.slice() })) };
+  for (let k = 0; k < A2.symbols.length; k++) for (let i = mid + 1; i < A2.t.length; i++) { A2.close[k][i] *= 1.5; A2.ret[k][i] = 0.1; (A2.inp[k].c as Float64Array)[i] *= 1.5; }
+  const xbt2 = backtestXSection(xdoc, A2, { topK: xdoc.topK, rebalEvery: xdoc.rebalEvery }, 2190, { startI: xdoc.lookback + 1, endI: mid });
+  const xbt1 = backtestXSection(xdoc, A, { topK: xdoc.topK, rebalEvery: xdoc.rebalEvery }, 2190, { startI: xdoc.lookback + 1, endI: mid });
+  let xMaxDiff = 0; for (let i = xdoc.lookback + 2; i <= mid; i++) xMaxDiff = Math.max(xMaxDiff, Math.abs(xbt1.ret[i] - xbt2.ret[i]));
+  check("xsection NO look-ahead (future corruption doesn't change past)", xMaxDiff < 1e-9, `maxDiff=${xMaxDiff.toExponential(2)}`);
+  // long-flat guard: weights never negative => returns bounded, no short blowups
+  check("xsection long-flat (carry flavor valid too)", validateXSection(generateXSection(7, "carry")).length === 0);
 
   console.log(failures === 0 ? "\nALL SMOKE TESTS PASSED" : `\n${failures} FAILURES`);
   process.exit(failures === 0 ? 0 : 1);

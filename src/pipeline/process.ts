@@ -12,7 +12,9 @@ import { crossoverStrategies, mutateStrategy, randomStrategy, recipeOf, setIcBia
 import { icFamilyWeights, icRankingText, type IcRankedRow } from "../engine/signals";
 import { SEED_LIBRARY } from "../engine/library";
 import { IMPORTED_LIBRARY } from "../engine/imports";
-import { evaluateSealed, runGauntlet, type GauntletReport } from "../engine/gauntlet";
+import { evaluateSealed, runGauntlet, runGauntletXSection, type GauntletReport } from "../engine/gauntlet";
+import { isXSection, alignUniverse, type XSectionDoc, type XAligned } from "../engine/xsection";
+import { generateXSection, validateXSection, xsectionHash, xsectionFamilyHash } from "../engine/xsectionGen";
 import { realityCheck } from "../engine/rigor";
 import { buildBook, marginalContribution, bookQualifies, type Stream } from "../engine/book";
 import { perSleeveSignificant, marginalAdmits, bookLevelGate } from "../engine/bookGate";
@@ -138,7 +140,7 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
   };
 
   const seedBase = (await cx.mutation(api.pipeline.bumpCounter, { key: "seed", by: 1 })) * 7919;
-  type Proposal = { doc: StrategyDoc; source: string; parentIds?: string[]; mechanism?: string; parentComposite?: number; expectedComposite?: number; wild?: boolean };
+  type Proposal = { doc: StrategyDoc | XSectionDoc; source: string; parentIds?: string[]; mechanism?: string; parentComposite?: number; expectedComposite?: number; wild?: boolean };
   const proposals: Proposal[] = [];
 
   // Library backfill: any research-backed seed or imported published strategy
@@ -201,6 +203,21 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
     summary.fresh++;
   }
 
+  // ---- CROSS-SECTIONAL lane (trend + carry, long-flat) ----------------------
+  // Universe-wide rank sleeves. Each is inherently cross-symbol and routes to the
+  // adapted gauntlet (S4 cross-symbol skipped). Reversal is NOT generated (spike
+  // proved it dead). Gated by cfg.xsection.enabled.
+  if (cfg.xsection?.enabled) {
+    const flavors: ("trend" | "trend_composite" | "carry" | "carry_trend")[] = ["trend", "trend_composite", "carry", "carry_trend"];
+    const xsN = Math.max(1, Math.round((cfg.xsection.perCycle ?? 4) * scale));
+    for (let i = 0; i < xsN; i++) {
+      const flavor = flavors[i % flavors.length];
+      const xdoc = generateXSection(seedBase + 200_000 + i, flavor);
+      proposals.push({ doc: xdoc, source: "xsection", mechanism: (xdoc as { mechanism?: string }).mechanism ?? "xsection", expectedComposite: globalMean, wild: false });
+      summary.fresh++;
+    }
+  }
+
   // LLM lane. Anthropic goes through the subscription Claude CLI (NO API key),
   // which now runs in BOTH the VPS and the Trigger cloud image (the claude bin
   // is baked in and authed from the injected CLAUDE_CODE_OAUTH_TOKEN). On any CLI
@@ -240,18 +257,21 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
 
   // validate, dedupe, register
   for (const p of proposals) {
-    if (validateStrategy(p.doc).length > 0) continue;
-    const hash = canonicalHash(p.doc);
+    // CROSS-SECTIONAL docs use their own validate/hash/family (not StrategyDoc).
+    let hash: string, fam: string, premium: string | undefined;
+    if (isXSection(p.doc)) {
+      if (validateXSection(p.doc).length > 0) continue;
+      hash = xsectionHash(p.doc); fam = xsectionFamilyHash(p.doc); premium = "xsection";
+    } else {
+      const sdoc = p.doc as StrategyDoc;
+      if (validateStrategy(sdoc).length > 0) continue;
+      hash = canonicalHash(sdoc); fam = familyHash(sdoc);
+      try { premium = premiumOf(sdoc); } catch { premium = undefined; }
+    }
     if (await cx.query(api.candidates.hashExists, { hash })) { summary.duplicates++; continue; }
-    const fam = familyHash(p.doc);
     const famCount = await cx.query(api.candidates.familySeenCount, { familyHash: fam });
     if (famCount >= 10) { summary.duplicates++; continue; }
     const mechanism = p.mechanism ?? "fresh";
-    // WAVE-3b LIVE-ADDITIVE: tag the inferred risk-premium family. Best-effort —
-    // classification is pure/deterministic and never throws on a valid doc, but
-    // guard anyway so a tagging bug can never block candidate registration.
-    let premium: string | undefined;
-    try { premium = premiumOf(p.doc); } catch { premium = undefined; }
     const { id, duplicate } = await cx.mutation(api.candidates.create, {
       name: p.doc.name, source: p.source, parentIds: p.parentIds,
       dsl: JSON.stringify(p.doc), hash, familyHash: fam, hypothesis: p.doc.hypothesis, mechanism, premium,
@@ -291,8 +311,15 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   const cand = await cx.query(api.candidates.get, { id: candidateId });
   if (!cand) throw new Error("candidate not found");
   const cfg = await getAppConfig(cx);
-  const doc = JSON.parse(cand.dsl) as StrategyDoc;
+  const rawDoc = JSON.parse(cand.dsl) as StrategyDoc | XSectionDoc;
   const sealTs = Date.parse(cfg.sealDate);
+
+  // CROSS-SECTIONAL routing: an xsection sleeve takes the adapted gauntlet path
+  // (S4 cross-symbol skipped; honesty tests on the single universe-wide stream).
+  if (isXSection(rawDoc)) {
+    return processXSectionCandidate(cx, candidateId, cand, rawDoc, cfg, sealTs, log);
+  }
+  const doc = rawDoc as StrategyDoc;
 
   // WAVE-3b: select the tuner for this process. DEFAULT FALSE => legacy adaptive
   // random-search + hill-climb (unchanged). When `bayesTuning` is on, tune() and
@@ -352,9 +379,20 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   const ppy = PPY[tf] ?? 8760;
   const primary = await loadBars(cfg.primarySymbol, tf);
   if (!primary || primary.t.length < ppy * 2.2) throw new Error(`primary ${tf} bars missing/short — run ingest first`);
+  // S4 SUBSET CAP: the live universe is now ~24 perps, so validating the S4
+  // cross-symbol loop against ALL of them would run ~23 per-symbol walk-forwards
+  // per candidate and blow the 1700s gauntletTask ceiling. Cap S4 to a fixed
+  // REPRESENTATIVE subset spanning large/mid cap (the S4 FLOOR values are
+  // unchanged — only the count of symbols validated against). Members not in the
+  // current universe are skipped. The full universe is still available for the
+  // cross-sectional lane (which evaluates over all of it).
+  const s4Subset = (cfg.crossSymbolSubset && cfg.crossSymbolSubset.length
+    ? cfg.crossSymbolSubset
+    : ["ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "AVAX/USDT", "LINK/USDT", "DOGE/USDT"]
+  ).filter((s) => s !== cfg.primarySymbol && cfg.universe.includes(s));
+  log(`S4 cross-symbol subset (${s4Subset.length}): ${s4Subset.join(", ")}`);
   const others: Bars[] = [];
-  for (const sym of cfg.universe) {
-    if (sym === cfg.primarySymbol) continue;
+  for (const sym of s4Subset) {
     const b = await loadBars(sym, tf);
     if (b && b.t.length > ppy * 1.7) others.push(b);
   }
@@ -736,4 +774,80 @@ async function bookGatePromote(
   });
   log(`BOOK-ADMITTED -> incubating: "${cand.name}" (book now ${C.nMembers} sleeves, Sharpe ${C.bookSharpe.toFixed(2)})`);
   return true;
+}
+
+// ====================================================================
+// CROSS-SECTIONAL candidate processing (adapted gauntlet + same downstream).
+// ====================================================================
+async function processXSectionCandidate(
+  cx: ConvexHttpClient,
+  candidateId: Id<"candidates">,
+  cand: { name: string; hypothesis: string; source: string; hash: string; familyHash: string },
+  doc: XSectionDoc,
+  cfg: AppConfig,
+  sealTs: number,
+  log: Log,
+): Promise<ProcessResult> {
+  await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "gauntlet" });
+  const tf = doc.tf ?? "4h";
+  const ppy = PPY[tf] ?? 2190;
+
+  // build the aligned universe over the candidate's tf (dev grid = all bars; the
+  // gauntlet splits pre/post seal internally). Restrict to symbols with history.
+  const barsList: { symbol: string; bars: import("../engine/types").Bars }[] = [];
+  for (const sym of cfg.universe) {
+    const b = await loadBars(sym, tf);
+    if (b && b.t.length > ppy * 1.7) barsList.push({ symbol: sym, bars: b });
+  }
+  if (barsList.length < 6) {
+    await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: "S0-static", failedReason: `only ${barsList.length} universe symbols with data` });
+    return { passed: false, stage: "S0-static" };
+  }
+  const aligned: XAligned = alignUniverse(barsList);
+  // sealed-window aligned universe (bars >= sealTs) for the holdout
+  const sealedBarsList = barsList.map(({ symbol, bars }) => {
+    const idx = bars.t.findIndex((t) => t >= sealTs);
+    if (idx < 0) return null;
+    const sl = (a: number[]) => a.slice(idx);
+    const sealed: import("../engine/types").Bars = { symbol, tf: bars.tf, t: sl(bars.t), o: sl(bars.o), h: sl(bars.h), l: sl(bars.l), c: sl(bars.c), v: sl(bars.v), fundingT: bars.fundingT?.filter((t) => t >= sealTs), fundingR: bars.fundingT ? bars.fundingR?.filter((_, i) => (bars.fundingT as number[])[i] >= sealTs) : undefined };
+    return { symbol, bars: sealed };
+  }).filter((x): x is { symbol: string; bars: import("../engine/types").Bars } => x !== null);
+  const alignedSealed = sealedBarsList.length >= 6 ? alignUniverse(sealedBarsList) : undefined;
+
+  const nTrials = await cx.query(api.candidates.familySeenCount, { familyHash: cand.familyHash });
+  await cx.mutation(api.pipeline.bumpCounter, { key: "trials_total", by: 1 });
+
+  const report = runGauntletXSection({ doc, aligned, alignedSealed, sealTs, floors: cfg.floors, nTrialsTotal: Math.max(nTrials, 40), log });
+
+  for (const s of report.stages) {
+    await cx.mutation(api.pipeline.addGateReport, { candidateId, stage: s.stage, passed: s.passed, reason: s.reason, report: JSON.stringify(s.detail ?? {}).slice(0, 20_000), durationMs: s.durationMs });
+  }
+  const curvesJson = JSON.stringify(report.curves ?? {});
+
+  if (!report.passed) {
+    const partial = report.metrics.wfPooledSharpe !== undefined ? 0.5 * report.metrics.wfPooledSharpe : undefined;
+    // BOOK-GATE: a cross-sectional sleeve that failed standalone S5x-DSR is exactly
+    // the diversifier we want — route it through the same book-marginal gate.
+    if (cfg.book.marginalGate && report.failedStage === "S5x-stats" && (report.failedReason ?? "").startsWith("DSR") && report.portfolioOos && report.portfolioOos.ret.length >= 100) {
+      try {
+        const admitted = await bookGatePromote(cx, cand, candidateId, report, cfg, ppy, log);
+        if (admitted) return { passed: true, composite: report.metrics.portOosSharpe };
+      } catch (e) { log(`xsection book-gate skipped: ${e instanceof Error ? e.message.slice(0, 100) : e}`); }
+    }
+    await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: report.failedStage, failedReason: report.failedReason, metrics: JSON.stringify(report.metrics), curves: curvesJson, composite: partial });
+    await cx.mutation(api.pipeline.addLesson, { source: cand.source, candidateId, stage: report.failedStage, text: `XSECTION FAILED ${report.failedStage}: "${cand.name}" — ${report.failedReason}` });
+    log(`XSECTION FAILED at ${report.failedStage}: ${report.failedReason}`);
+    return { passed: false, stage: report.failedStage };
+  }
+
+  // PASSED the adapted gauntlet (incl its own sealed) -> paper incubation
+  await cx.mutation(api.paper.ensureAccount, { candidateId, startEquity: cfg.paperStartEquity });
+  await cx.mutation(api.candidates.updateStage, {
+    id: candidateId, stage: "incubating",
+    metrics: JSON.stringify(report.metrics), bestParams: JSON.stringify(report.bestParams ?? {}),
+    curves: curvesJson, composite: report.metrics.composite ?? report.metrics.portOosSharpe, incubationStartedAt: Date.now(),
+  });
+  await cx.mutation(api.pipeline.addLesson, { source: cand.source, candidateId, text: `XSECTION PASSED: "${cand.name}" cross-sectional sleeve (OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)}, dsr ${(report.metrics.dsr ?? 0).toFixed(2)}) -> 30-day paper incubation. ${cand.hypothesis.slice(0, 100)}` });
+  log(`XSECTION PASSED -> incubating (OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)})`);
+  return { passed: true, composite: report.metrics.composite };
 }
