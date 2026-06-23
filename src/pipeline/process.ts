@@ -447,7 +447,16 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
       text: `FAILED ${report.failedStage}: "${cand.name}" (${cand.hypothesis.slice(0, 90)}) — ${report.failedReason}`,
     });
     const familySeen = await cx.query(api.candidates.familySeenCount, { familyHash: cand.familyHash });
-    if (familySeen >= 4) {
+    // GENERALIZER EXEMPTION: only penalize genuine dead-ends. A family that reached
+    // S4-portfolio (got PAST the cross-symbol gate) or was WF-positive on >=2 perps
+    // is a proven cross-sectional generalizer whose failure here is "portfolio Sharpe
+    // a bit low", not "does not generalize" — those are exactly the genes the breeder
+    // needs, so we keep them in the gene pool instead of boxing them. Dead-ends that
+    // never clear S2/S3 (cross<2, never reached S4-portfolio) are still penalized.
+    const reachedPortfolio = (report.failedStage ?? "") === "S4-portfolio"
+      || ["S5-stats", "S5b-stress", "S6-sealed"].includes(report.failedStage ?? "");
+    const generalizes = reachedPortfolio || (report.metrics.crossSymbolPositive ?? 0) >= 2;
+    if (familySeen >= 4 && !generalizes) {
       await cx.mutation(api.pipeline.penalize, { familyHash: cand.familyHash, reason: `family failed ${familySeen}x`, days: 7 });
     }
     log(`FAILED at ${report.failedStage}: ${report.failedReason}`);
