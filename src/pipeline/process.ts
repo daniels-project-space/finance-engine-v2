@@ -90,7 +90,12 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
         }
       } catch { /* keep defaults */ }
     }
-    return { doc, id: c._id as string, hint: hintFor(c.failedReason), composite: c.composite ?? 0, family: c.familyHash };
+    // GENERATION-STEER: how many of the 5 perps this parent was WF-positive on at
+    // S4 (stored in metrics). Used to bias breeding toward cross-symbol generalizers
+    // rather than single-symbol (BTC) overfits — the dominant cause of death.
+    let crossSym = 0;
+    try { crossSym = (JSON.parse(c.metrics ?? "{}") as { crossSymbolPositive?: number }).crossSymbolPositive ?? 0; } catch { /* none */ }
+    return { doc, id: c._id as string, hint: hintFor(c.failedReason), composite: c.composite ?? 0, family: c.familyHash, crossSym };
   });
 
   // ---- intelligence upgrade: learned (Thompson) selection ----
@@ -116,8 +121,13 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
   const globalMean = ledger.length
     ? ledger.reduce((s, r) => s + (r.meanComposite || 0) * r.compositeN, 0) / Math.max(1, ledger.reduce((s, r) => s + r.compositeN, 0))
     : 0;
-  // fitness-proportional parent picker, weighted by composite (floored)
-  const parentWeights = parents.map((p) => Math.max(0.05, p.composite));
+  // fitness-proportional parent picker, weighted by composite (floored) AND by
+  // cross-symbol reach: a parent WF-positive on more of the 5 perps gets bred more
+  // often, so the gene pool drifts toward generalizers. 0/1 symbols => x1 (no
+  // boost), each extra symbol adds 40% up to ~2.6x at the full 5/5. Composite still
+  // dominates magnitude; this only re-ranks within the survivors. No gauntlet gate
+  // is touched — purely a generation-side breeding preference.
+  const parentWeights = parents.map((p) => Math.max(0.05, p.composite) * (1 + 0.4 * Math.max(0, (p.crossSym ?? 0) - 1)));
   const parentWeightSum = parentWeights.reduce((a, b) => a + b, 0);
   const pickParent = (): typeof parents[number] => {
     if (!parents.length) return parents[0];

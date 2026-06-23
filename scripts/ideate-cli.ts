@@ -68,15 +68,28 @@ async function main() {
     const bestComposite = Math.max(0, ...board.map((b) => b.composite ?? 0));
     const failureForensics = board.slice(0, 6).map((b) => {
       const m = b.metrics ? JSON.parse(b.metrics) as Record<string, number> : {};
-      return `"${b.name}": btcWfSharpe=${(m.wfPooledSharpe ?? 0).toFixed(2)} fullSharpe=${(m.fullSharpe ?? 0).toFixed(2)} maxDD=${((m.fullMaxDD ?? 0) * 100).toFixed(0)}% — killed at ${b.failedStage}: ${b.failedReason}`;
+      // GENERATION-STEER: surface the cross-symbol breakdown so the model SEES that
+      // a leader is a single-symbol (BTC) overfit — strong BTC WF Sharpe but
+      // generalizing to too few of the 5 perps — the dominant cause of death at S4.
+      const xsym = m.crossSymbolPositive;
+      const xsymNote = b.failedStage === "S4-cross-symbol" && typeof xsym === "number"
+        ? ` — GENERALIZED ON ONLY ${xsym}/6 PERPS (great on BTC, failed on the rest = single-symbol overfit)`
+        : "";
+      return `"${b.name}": btcWfSharpe=${(m.wfPooledSharpe ?? 0).toFixed(2)} fullSharpe=${(m.fullSharpe ?? 0).toFixed(2)} maxDD=${((m.fullMaxDD ?? 0) * 100).toFixed(0)}% — killed at ${b.failedStage}: ${b.failedReason}${xsymNote}`;
     }).join("\n");
+
+    // How many recent leaders died specifically because they only worked on BTC—
+    // makes the universality mandate concrete in the prompt.
+    const btcOnlyDeaths = board.slice(0, 6).filter((b) => b.failedStage === "S4-cross-symbol").length;
 
     const prompt = `${buildPrompt(lessons, "", n, championSummary)}
 
 MISSION: the current best composite on the board is ${bestComposite.toFixed(2)}. Your strategies must aim to BEAT ${(bestComposite * 2).toFixed(2)} (double). Failure forensics of the current leaders — design around these exact causes of death:
 ${failureForensics}
 
-TARGET: deployed 5-pair portfolio OOS Sharpe >= 1.5 with CAGR >= 30%, surviving re-tuning walk-forward, cross-symbol generalization, DSR/permutation/bootstrap, stress, sealed holdout. Strategies are traded equal-weight across BTC/ETH/SOL/BNB/XRP perps — design rules that generalize ACROSS assets, not BTC-specific fits. The DSL has a "funding" operator ({"op":"funding"}) exposing the per-bar perp funding rate — carry/crowding mechanisms are encouraged. Mind the floors that killed the leaders: OOS maxDD must stay above -30%, worst month above -15%, >=55% positive months at PORTFOLIO level. Use the risk overlay (stopAtrMult/trailAtrMult/volTargetAnnual) deliberately — drawdown control is what the near-misses lacked.
+CRITICAL — CROSS-SECTIONAL UNIVERSALITY (this is why the leaders keep dying): ${btcOnlyDeaths} of the recent leaders were killed at S4 because they only generalized to 1-2 of the 5 perps — strong on BTC but really BTC-specific overfits. Each strategy is tuned and traded SEPARATELY on EACH of BTC/ETH/SOL/BNB/XRP and must be WF-positive on at least 3 of them. So propose mechanisms grounded in UNIVERSAL perp microstructure that behaves identically across every USDT perp — funding rate / funding z-score+acceleration ({"op":"fundzscore"}/{"op":"fundaccel"}), perp-spot basis ({"op":"basis"}), open-interest dynamics ({"op":"oi"}), taker long/short ratio ({"op":"lsr"}), and scale-free normalized price structure (zscore/pctrank, never raw price levels or BTC-specific thresholds). AVOID: absolute price/dollar thresholds, hand-tuned constants that only make sense for BTC, and any pattern whose edge depends on one asset\'s idiosyncratic history. ASK YOURSELF for every rule: "would this same rule, re-tuned, profit on SOL and XRP too?" If not, redesign it.
+
+TARGET: deployed 5-pair portfolio OOS Sharpe >= 1.5 with CAGR >= 30%, surviving re-tuning walk-forward, cross-symbol generalization, DSR/permutation/bootstrap, stress, sealed holdout. Strategies are traded equal-weight across BTC/ETH/SOL/BNB/XRP perps. The funding/basis/oi/lsr operators expose universal perp dynamics — carry/crowding/positioning mechanisms are strongly encouraged because they generalize cross-sectionally. Mind the floors that killed the leaders: OOS maxDD must stay above -30%, worst month above -15%, >=55% positive months at PORTFOLIO level. Use the risk overlay (stopAtrMult/trailAtrMult/volTargetAnnual) deliberately — drawdown control is what the near-misses lacked.
 
 Output ONLY the JSON object. No prose, no markdown fences.`;
 
