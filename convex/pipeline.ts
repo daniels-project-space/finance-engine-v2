@@ -32,6 +32,18 @@ export const penalize = mutation({
     ctx.db.insert("penaltyBox", { familyHash, reason, until: Date.now() + days * 86400_000, createdAt: Date.now() }),
 });
 
+// Clear all penalty-box rows for a family. Reversible: the family re-accrues a
+// 7-day penalty the next time a candidate of it fails with familySeen >= 4, so this
+// is a selective unblock, not a permanent exemption. Returns the count removed.
+export const clearPenalty = mutation({
+  args: { familyHash: v.string() },
+  handler: async (ctx, { familyHash }) => {
+    const rows = await ctx.db.query("penaltyBox").withIndex("by_family", (q) => q.eq("familyHash", familyHash)).collect();
+    for (const r of rows) await ctx.db.delete(r._id);
+    return rows.length;
+  },
+});
+
 export const isPenalized = query({
   args: { familyHash: v.string() },
   handler: async (ctx, { familyHash }) => {
