@@ -258,7 +258,7 @@ async function main() {
   let xMaxDiff = 0; for (let i = xdoc.lookback + 2; i <= mid; i++) xMaxDiff = Math.max(xMaxDiff, Math.abs(xbt1.ret[i] - xbt2.ret[i]));
   check("xsection NO look-ahead (future corruption doesn't change past)", xMaxDiff < 1e-9, `maxDiff=${xMaxDiff.toExponential(2)}`);
   // PURE non-momentum flavors all valid + long-flat (funding/basis/oi/lsr ranks)
-  const pureFlavors = ["carry_funding", "basis_disloc", "oi_washout", "lsr_contrarian"] as const;
+  const pureFlavors = ["carry_funding", "basis_disloc", "oi_washout", "lsr_contrarian", "liquidity", "size"] as const;
   let pureOk = true; for (const fl of pureFlavors) { const d = generateXSection(7, fl); if (validateXSection(d).length || d.side !== "long-flat") pureOk = false; }
   check("xsection pure non-momentum flavors valid + long-flat", pureOk, pureFlavors.join(","));
   // look-ahead probe on a FUNDING-driven rank (its inputs must also be causal)

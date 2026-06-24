@@ -212,7 +212,7 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
   // that is positive AND orthogonal to momentum. Reversal omitted (spike: dead).
   if (cfg.xsection?.enabled) {
     const flavors: import("../engine/xsectionGen").XSectionFlavor[] = [
-      "carry_funding", "basis_disloc", "oi_washout", "lsr_contrarian", "trend", "trend_composite",
+      "carry_funding", "basis_disloc", "oi_washout", "lsr_contrarian", "liquidity", "size", "trend", "trend_composite",
     ];
     const xsN = Math.max(1, Math.round((cfg.xsection.perCycle ?? 4) * scale));
     for (let i = 0; i < xsN; i++) {

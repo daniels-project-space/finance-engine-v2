@@ -29,7 +29,7 @@ function trailingReturn(lookbackRef: Expr): Expr {
  *  - "carry_trend": funding-screened trend (trend rank gated by low funding).
  * All LONG-FLAT. tf defaults to 4h (sane turnover).
  */
-export type XSectionFlavor = "trend" | "trend_composite" | "carry_funding" | "basis_disloc" | "oi_washout" | "lsr_contrarian";
+export type XSectionFlavor = "trend" | "trend_composite" | "carry_funding" | "basis_disloc" | "oi_washout" | "lsr_contrarian" | "liquidity" | "size";
 
 export function generateXSection(seed: number, flavor: XSectionFlavor): XSectionDoc {
   const rng = mulberry32(seed);
@@ -86,7 +86,7 @@ export function generateXSection(seed: number, flavor: XSectionFlavor): XSection
     rankSignal = { op: "neg", a: { op: "zscore", src: { op: "roc", src: { op: "oi" }, period: win }, period: { op: "const", value: 96 } } };
     hypothesis = "PURE cross-sectional positioning washout (no trend): long the coins whose open interest contracted most (leverage flushed / de-crowded), expecting a rebound from cleaned-out positioning. Distinct from price trend. Long top-K, long-flat.";
     mechanism = "xs_oi";
-  } else {
+  } else if (flavor === "lsr_contrarian") {
     // PURE LSR CONTRARIAN — NO trend term. Rank by taker long/short ratio; long the
     // coins where the crowd is LEAST long (lowest LSR z-score = washed-out / fearful),
     // a contrarian positioning premium. Pure microstructure.
@@ -94,6 +94,28 @@ export function generateXSection(seed: number, flavor: XSectionFlavor): XSection
     rankSignal = { op: "neg", a: { op: "zscore", src: { op: "lsr" }, period: win } };
     hypothesis = "PURE cross-sectional positioning contrarian (no trend): long the coins where the taker long/short ratio is most depressed (crowd least long / capitulated), a contrarian rebound premium. Orthogonal to momentum. Long top-K, long-flat.";
     mechanism = "xs_lsr";
+  } else if (flavor === "liquidity") {
+    // LIQUIDITY FACTOR — NO trend term. Rank by trailing dollar volume (close*volume,
+    // smoothed = ADV proxy). The liquidity premium says LESS-liquid assets carry
+    // higher expected returns (illiquidity compensation), so we rank HIGH when ADV is
+    // LOW (long the smaller/less-liquid tier). Pure characteristic, not price trend.
+    const win = declare("lqwin", 20, 160, 60);
+    const dollarVol: Expr = { op: "mul", a: { op: "price", field: "close" }, b: { op: "price", field: "volume" } };
+    const adv: Expr = { op: "sma", src: dollarVol, period: win };
+    rankSignal = { op: "neg", a: { op: "zscore", src: adv, period: { op: "const", value: 100 } } };
+    hypothesis = "Cross-sectional liquidity factor (no trend): long the LESS-liquid tier (lowest trailing dollar-volume / ADV, z-scored) to harvest the illiquidity premium — smaller/less-traded coins compensate holders with higher expected return. A priced characteristic distinct from momentum. Long top-K, long-flat.";
+    mechanism = "xs_liquidity";
+  } else {
+    // SIZE FACTOR — NO trend term. No market-cap feed, so use trailing dollar volume
+    // as a SIZE proxy (research: volume-as-proxy when cap unavailable). The size/small-
+    // cap premium says SMALLER assets carry higher expected returns, so rank HIGH when
+    // the size proxy is LOW (long the smaller tier). Long-biased characteristic.
+    const win = declare("szwin", 40, 240, 120);
+    const dollarVol: Expr = { op: "mul", a: { op: "price", field: "close" }, b: { op: "price", field: "volume" } };
+    const sizeProxy: Expr = { op: "sma", src: dollarVol, period: win }; // long-window avg $vol ~ size
+    rankSignal = { op: "neg", a: { op: "zscore", src: sizeProxy, period: { op: "const", value: 150 } } };
+    hypothesis = "Cross-sectional size factor (no trend): long the SMALLER tier (lowest long-window dollar-volume proxy for market cap, z-scored) to harvest the small-cap premium. A priced characteristic, long-biased, distinct from momentum. Long top-K, long-flat.";
+    mechanism = "xs_size";
   }
 
   const doc: XSectionDoc = {
