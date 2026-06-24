@@ -203,12 +203,17 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
     summary.fresh++;
   }
 
-  // ---- CROSS-SECTIONAL lane (trend + carry, long-flat) ----------------------
-  // Universe-wide rank sleeves. Each is inherently cross-symbol and routes to the
-  // adapted gauntlet (S4 cross-symbol skipped). Reversal is NOT generated (spike
-  // proved it dead). Gated by cfg.xsection.enabled.
+  // ---- CROSS-SECTIONAL lane (momentum + PURE non-momentum, long-flat) -------
+  // Universe-wide rank sleeves routed to the adapted gauntlet (S4 skipped). The
+  // first cycle showed trend-flavored sleeves re-correlate with the momentum
+  // cluster (0.79-0.92), so the lane now PRIORITIZES pure NON-MOMENTUM rank
+  // signals (funding-carry / basis-dislocation / OI-washout / LSR-contrarian) —
+  // each driven purely by microstructure with NO trend term — to seek a sleeve
+  // that is positive AND orthogonal to momentum. Reversal omitted (spike: dead).
   if (cfg.xsection?.enabled) {
-    const flavors: ("trend" | "trend_composite" | "carry" | "carry_trend")[] = ["trend", "trend_composite", "carry", "carry_trend"];
+    const flavors: import("../engine/xsectionGen").XSectionFlavor[] = [
+      "carry_funding", "basis_disloc", "oi_washout", "lsr_contrarian", "trend", "trend_composite",
+    ];
     const xsN = Math.max(1, Math.round((cfg.xsection.perCycle ?? 4) * scale));
     for (let i = 0; i < xsN; i++) {
       const flavor = flavors[i % flavors.length];

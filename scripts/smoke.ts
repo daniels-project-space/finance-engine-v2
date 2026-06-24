@@ -257,8 +257,16 @@ async function main() {
   const xbt1 = backtestXSection(xdoc, A, { topK: xdoc.topK, rebalEvery: xdoc.rebalEvery }, 2190, { startI: xdoc.lookback + 1, endI: mid });
   let xMaxDiff = 0; for (let i = xdoc.lookback + 2; i <= mid; i++) xMaxDiff = Math.max(xMaxDiff, Math.abs(xbt1.ret[i] - xbt2.ret[i]));
   check("xsection NO look-ahead (future corruption doesn't change past)", xMaxDiff < 1e-9, `maxDiff=${xMaxDiff.toExponential(2)}`);
-  // long-flat guard: weights never negative => returns bounded, no short blowups
-  check("xsection long-flat (carry flavor valid too)", validateXSection(generateXSection(7, "carry")).length === 0);
+  // PURE non-momentum flavors all valid + long-flat (funding/basis/oi/lsr ranks)
+  const pureFlavors = ["carry_funding", "basis_disloc", "oi_washout", "lsr_contrarian"] as const;
+  let pureOk = true; for (const fl of pureFlavors) { const d = generateXSection(7, fl); if (validateXSection(d).length || d.side !== "long-flat") pureOk = false; }
+  check("xsection pure non-momentum flavors valid + long-flat", pureOk, pureFlavors.join(","));
+  // look-ahead probe on a FUNDING-driven rank (its inputs must also be causal)
+  const fdoc = generateXSection(7, "carry_funding");
+  const fbt1 = backtestXSection(fdoc, A, { topK: fdoc.topK, rebalEvery: fdoc.rebalEvery }, 2190, { startI: fdoc.lookback + 1, endI: mid });
+  const fbt2 = backtestXSection(fdoc, A2, { topK: fdoc.topK, rebalEvery: fdoc.rebalEvery }, 2190, { startI: fdoc.lookback + 1, endI: mid });
+  let fDiff = 0; for (let i = fdoc.lookback + 2; i <= mid; i++) fDiff = Math.max(fDiff, Math.abs(fbt1.ret[i] - fbt2.ret[i]));
+  check("xsection funding-rank NO look-ahead", fDiff < 1e-9, `maxDiff=${fDiff.toExponential(2)}`);
 
   console.log(failures === 0 ? "\nALL SMOKE TESTS PASSED" : `\n${failures} FAILURES`);
   process.exit(failures === 0 ? 0 : 1);

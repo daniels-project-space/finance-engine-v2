@@ -29,7 +29,9 @@ function trailingReturn(lookbackRef: Expr): Expr {
  *  - "carry_trend": funding-screened trend (trend rank gated by low funding).
  * All LONG-FLAT. tf defaults to 4h (sane turnover).
  */
-export function generateXSection(seed: number, flavor: "trend" | "trend_composite" | "carry" | "carry_trend"): XSectionDoc {
+export type XSectionFlavor = "trend" | "trend_composite" | "carry_funding" | "basis_disloc" | "oi_washout" | "lsr_contrarian";
+
+export function generateXSection(seed: number, flavor: XSectionFlavor): XSectionDoc {
   const rng = mulberry32(seed);
   const params: Record<string, ParamSpec> = {};
   const declare = (name: string, min: number, max: number, def: number, int = true): Expr => {
@@ -59,17 +61,39 @@ export function generateXSection(seed: number, flavor: "trend" | "trend_composit
     rankSignal = { op: "add", a: trailingReturn(lbF), b: trailingReturn(lbS) };
     hypothesis = "Cross-sectional momentum composite (fast+slow horizon blend): coins persistently strong across horizons lead the cross-section. Long top-K, long-flat.";
     mechanism = "xs_trend";
-  } else if (flavor === "carry") {
-    // rank HIGH when cumulative funding is LOW/negative (you are paid to hold long)
-    rankSignal = { op: "neg", a: { op: "fundmom" } };
-    hypothesis = "Cross-sectional carry: long the coins with the LEAST positive (or negative) funding — longs there are paid by crowded shorts rather than paying crowded longs. Harvests the funding carry premium cross-sectionally. Long top-K, long-flat.";
-    mechanism = "xs_carry";
+  } else if (flavor === "carry_funding") {
+    // PURE FUNDING CARRY — NO trend term. Rank coins by how favorable funding is to
+    // a long-flat holder: a long RECEIVES funding when funding is NEGATIVE (crowded
+    // shorts pay longs). Rank HIGH when the funding z-score is most negative.
+    // zscore over a window normalizes cross-coin funding scale. Pure microstructure.
+    const win = declare("fwin", 24, 240, 96);
+    rankSignal = { op: "neg", a: { op: "zscore", src: { op: "funding" }, period: win } };
+    hypothesis = "PURE cross-sectional funding carry (no trend): long the coins whose perp funding is most NEGATIVE (z-scored) — crowded shorts pay you to hold long there. Harvests the funding-premium directly; economically orthogonal to price momentum. Long top-K, long-flat.";
+    mechanism = "xs_carry_funding";
+  } else if (flavor === "basis_disloc") {
+    // PURE BASIS MEAN-REVERSION — NO trend term. Rank by perp-spot basis; long the
+    // coins trading at the biggest DISCOUNT (most negative basis), expecting
+    // convergence back to fair. z-score the basis for cross-coin comparability.
+    const win = declare("bwin", 24, 240, 96);
+    rankSignal = { op: "neg", a: { op: "zscore", src: { op: "basis" }, period: win } };
+    hypothesis = "PURE cross-sectional basis dislocation (no trend): long the coins whose perp trades cheapest vs spot (most negative basis, z-scored), expecting basis convergence. A carry/mean-reversion premium distinct from momentum. Long top-K, long-flat.";
+    mechanism = "xs_basis";
+  } else if (flavor === "oi_washout") {
+    // PURE POSITIONING WASHOUT — NO trend term. Rank by OI change: long the coins
+    // with the largest OI CONTRACTION (positioning flushed out / de-crowded),
+    // expecting a rebound from washed-out leverage. roc(oi) negative = washout.
+    const win = declare("owin", 12, 120, 48);
+    rankSignal = { op: "neg", a: { op: "zscore", src: { op: "roc", src: { op: "oi" }, period: win }, period: { op: "const", value: 96 } } };
+    hypothesis = "PURE cross-sectional positioning washout (no trend): long the coins whose open interest contracted most (leverage flushed / de-crowded), expecting a rebound from cleaned-out positioning. Distinct from price trend. Long top-K, long-flat.";
+    mechanism = "xs_oi";
   } else {
-    // carry_trend: trend rank, screened to coins not paying heavy funding
-    const lb = declare("lb", 20, 160, lookback);
-    rankSignal = { op: "sub", a: trailingReturn(lb), b: { op: "mul", a: { op: "const", value: 5 }, b: { op: "max2", a: { op: "fundmom" }, b: { op: "const", value: 0 } } } };
-    hypothesis = "Cross-sectional trend, funding-screened: rank by trailing return but penalize coins with high positive funding (crowded longs that bleed carry). Combines momentum + carry cross-sectionally. Long top-K, long-flat.";
-    mechanism = "xs_carry";
+    // PURE LSR CONTRARIAN — NO trend term. Rank by taker long/short ratio; long the
+    // coins where the crowd is LEAST long (lowest LSR z-score = washed-out / fearful),
+    // a contrarian positioning premium. Pure microstructure.
+    const win = declare("lwin", 24, 240, 96);
+    rankSignal = { op: "neg", a: { op: "zscore", src: { op: "lsr" }, period: win } };
+    hypothesis = "PURE cross-sectional positioning contrarian (no trend): long the coins where the taker long/short ratio is most depressed (crowd least long / capitulated), a contrarian rebound premium. Orthogonal to momentum. Long top-K, long-flat.";
+    mechanism = "xs_lsr";
   }
 
   const doc: XSectionDoc = {
