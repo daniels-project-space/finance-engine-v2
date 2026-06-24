@@ -12,9 +12,12 @@ import { crossoverStrategies, mutateStrategy, randomStrategy, recipeOf, setIcBia
 import { icFamilyWeights, icRankingText, type IcRankedRow } from "../engine/signals";
 import { SEED_LIBRARY } from "../engine/library";
 import { IMPORTED_LIBRARY } from "../engine/imports";
-import { evaluateSealed, runGauntlet, runGauntletXSection, type GauntletReport } from "../engine/gauntlet";
+import { evaluateSealed, runGauntlet, runGauntletXSection, runGauntletIv, type GauntletReport } from "../engine/gauntlet";
 import { isXSection, alignUniverse, type XSectionDoc, type XAligned } from "../engine/xsection";
 import { generateXSection, validateXSection, xsectionHash, xsectionFamilyHash } from "../engine/xsectionGen";
+import { isIvSleeve, buildIvDaily, type IvSleeveDoc, type IvDaily } from "../engine/ivsleeve";
+import { generateIvSleeve, validateIvSleeve, ivSleeveHash, ivSleeveFamilyHash } from "../engine/ivsleeveGen";
+import { loadDvol, dvolMap, dvolCurrencyFor } from "../lib/deribit";
 import { realityCheck } from "../engine/rigor";
 import { buildBook, marginalContribution, bookQualifies, type Stream } from "../engine/book";
 import { perSleeveSignificant, marginalAdmits, bookLevelGate } from "../engine/bookGate";
@@ -140,7 +143,7 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
   };
 
   const seedBase = (await cx.mutation(api.pipeline.bumpCounter, { key: "seed", by: 1 })) * 7919;
-  type Proposal = { doc: StrategyDoc | XSectionDoc; source: string; parentIds?: string[]; mechanism?: string; parentComposite?: number; expectedComposite?: number; wild?: boolean };
+  type Proposal = { doc: StrategyDoc | XSectionDoc | IvSleeveDoc; source: string; parentIds?: string[]; mechanism?: string; parentComposite?: number; expectedComposite?: number; wild?: boolean };
   const proposals: Proposal[] = [];
 
   // Library backfill: any research-backed seed or imported published strategy
@@ -223,6 +226,19 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
     }
   }
 
+  // ---- IV-TIMING lane (options-IV, the orthogonal diversifier) --------------
+  // Long-flat BTC/ETH perp timing on the Deribit DVOL implied-vol regime. The
+  // first genuinely-orthogonal sleeve family (~0.18 corr to momentum). Routes to
+  // the adapted IV gauntlet + the book gate. Gated by cfg.ivsleeve.enabled.
+  if (cfg.ivsleeve?.enabled) {
+    const ivN = Math.max(1, Math.round((cfg.ivsleeve.perCycle ?? 2) * scale));
+    for (let i = 0; i < ivN; i++) {
+      const ivdoc = generateIvSleeve(seedBase + 300_000 + i);
+      proposals.push({ doc: ivdoc, source: "ivsleeve", mechanism: "iv_timing", expectedComposite: globalMean, wild: false });
+      summary.fresh++;
+    }
+  }
+
   // LLM lane. Anthropic goes through the subscription Claude CLI (NO API key),
   // which now runs in BOTH the VPS and the Trigger cloud image (the claude bin
   // is baked in and authed from the injected CLAUDE_CODE_OAUTH_TOKEN). On any CLI
@@ -262,11 +278,14 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
 
   // validate, dedupe, register
   for (const p of proposals) {
-    // CROSS-SECTIONAL docs use their own validate/hash/family (not StrategyDoc).
+    // CROSS-SECTIONAL / IV docs use their own validate/hash/family (not StrategyDoc).
     let hash: string, fam: string, premium: string | undefined;
     if (isXSection(p.doc)) {
       if (validateXSection(p.doc).length > 0) continue;
       hash = xsectionHash(p.doc); fam = xsectionFamilyHash(p.doc); premium = "xsection";
+    } else if (isIvSleeve(p.doc)) {
+      if (validateIvSleeve(p.doc).length > 0) continue;
+      hash = ivSleeveHash(p.doc); fam = ivSleeveFamilyHash(p.doc); premium = "ivsleeve";
     } else {
       const sdoc = p.doc as StrategyDoc;
       if (validateStrategy(sdoc).length > 0) continue;
@@ -316,13 +335,17 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   const cand = await cx.query(api.candidates.get, { id: candidateId });
   if (!cand) throw new Error("candidate not found");
   const cfg = await getAppConfig(cx);
-  const rawDoc = JSON.parse(cand.dsl) as StrategyDoc | XSectionDoc;
+  const rawDoc = JSON.parse(cand.dsl) as StrategyDoc | XSectionDoc | IvSleeveDoc;
   const sealTs = Date.parse(cfg.sealDate);
 
   // CROSS-SECTIONAL routing: an xsection sleeve takes the adapted gauntlet path
   // (S4 cross-symbol skipped; honesty tests on the single universe-wide stream).
   if (isXSection(rawDoc)) {
     return processXSectionCandidate(cx, candidateId, cand, rawDoc, cfg, sealTs, log);
+  }
+  // IV-TIMING routing: a single-coin options-IV perp-timing sleeve -> IV gauntlet.
+  if (isIvSleeve(rawDoc)) {
+    return processIvCandidate(cx, candidateId, cand, rawDoc, cfg, sealTs, log);
   }
   const doc = rawDoc as StrategyDoc;
 
@@ -854,5 +877,75 @@ async function processXSectionCandidate(
   });
   await cx.mutation(api.pipeline.addLesson, { source: cand.source, candidateId, text: `XSECTION PASSED: "${cand.name}" cross-sectional sleeve (OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)}, dsr ${(report.metrics.dsr ?? 0).toFixed(2)}) -> 30-day paper incubation. ${cand.hypothesis.slice(0, 100)}` });
   log(`XSECTION PASSED -> incubating (OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)})`);
+  return { passed: true, composite: report.metrics.composite };
+}
+
+// ====================================================================
+// IV-TIMING candidate processing (options-IV perp-timing sleeve).
+// ====================================================================
+async function processIvCandidate(
+  cx: ConvexHttpClient,
+  candidateId: Id<"candidates">,
+  cand: { name: string; hypothesis: string; source: string; hash: string; familyHash: string },
+  doc: IvSleeveDoc,
+  cfg: AppConfig,
+  sealTs: number,
+  log: Log,
+): Promise<ProcessResult> {
+  await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "gauntlet" });
+  const ppy = 365;
+  const cur = dvolCurrencyFor(doc.symbol);
+  if (!cur) {
+    await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: "S0-static", failedReason: `no DVOL for ${doc.symbol}` });
+    return { passed: false, stage: "S0-static" };
+  }
+  const bars = await loadBars(doc.symbol, "1d");
+  const dvolSeries = await loadDvol(cur);
+  if (!bars || !dvolSeries) {
+    await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: "S0-static", failedReason: "missing perp bars or DVOL series" });
+    return { passed: false, stage: "S0-static" };
+  }
+  const dm = dvolMap(dvolSeries);
+  const daily: IvDaily = buildIvDaily(bars, dm, doc.rvWin);
+  // sealed-window slice (days >= sealTs)
+  const sealIdx = daily.t.findIndex((t) => t >= sealTs);
+  const sl = <T>(a: T[]): T[] => sealIdx >= 0 ? a.slice(sealIdx) : [];
+  const dailySealed: IvDaily | undefined = sealIdx >= 0 && daily.t.length - sealIdx > 60
+    ? { t: sl(daily.t), ret: sl(daily.ret), dvol: sl(daily.dvol), rv: sl(daily.rv), funding: sl(daily.funding) }
+    : undefined;
+
+  const nTrials = await cx.query(api.candidates.familySeenCount, { familyHash: cand.familyHash });
+  await cx.mutation(api.pipeline.bumpCounter, { key: "trials_total", by: 1 });
+
+  const report = runGauntletIv({ doc, daily, dailySealed, sealTs, floors: cfg.floors, nTrialsTotal: Math.max(nTrials, 40), log });
+  for (const s of report.stages) {
+    await cx.mutation(api.pipeline.addGateReport, { candidateId, stage: s.stage, passed: s.passed, reason: s.reason, report: JSON.stringify(s.detail ?? {}).slice(0, 20_000), durationMs: s.durationMs });
+  }
+  const curvesJson = JSON.stringify(report.curves ?? {});
+
+  if (!report.passed) {
+    const partial = report.metrics.wfPooledSharpe !== undefined ? 0.5 * report.metrics.wfPooledSharpe : undefined;
+    // BOOK-GATE: an IV sleeve that failed standalone S5iv-DSR is the orthogonal
+    // diversifier we want — route it through the same book-marginal gate.
+    if (cfg.book.marginalGate && report.failedStage === "S5iv-stats" && (report.failedReason ?? "").startsWith("DSR") && report.portfolioOos && report.portfolioOos.ret.length >= 100) {
+      try {
+        const admitted = await bookGatePromote(cx, cand, candidateId, report, cfg, ppy, log);
+        if (admitted) return { passed: true, composite: report.metrics.portOosSharpe };
+      } catch (e) { log(`iv book-gate skipped: ${e instanceof Error ? e.message.slice(0, 100) : e}`); }
+    }
+    await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: report.failedStage, failedReason: report.failedReason, metrics: JSON.stringify(report.metrics), curves: curvesJson, composite: partial });
+    await cx.mutation(api.pipeline.addLesson, { source: cand.source, candidateId, stage: report.failedStage, text: `IV FAILED ${report.failedStage}: "${cand.name}" — ${report.failedReason}` });
+    log(`IV FAILED at ${report.failedStage}: ${report.failedReason}`);
+    return { passed: false, stage: report.failedStage };
+  }
+
+  await cx.mutation(api.paper.ensureAccount, { candidateId, startEquity: cfg.paperStartEquity });
+  await cx.mutation(api.candidates.updateStage, {
+    id: candidateId, stage: "incubating",
+    metrics: JSON.stringify(report.metrics), bestParams: JSON.stringify(report.bestParams ?? {}),
+    curves: curvesJson, composite: report.metrics.composite ?? report.metrics.portOosSharpe, incubationStartedAt: Date.now(),
+  });
+  await cx.mutation(api.pipeline.addLesson, { source: cand.source, candidateId, text: `IV PASSED: "${cand.name}" options-IV timing sleeve (OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)}, dsr ${(report.metrics.dsr ?? 0).toFixed(2)}) -> 30-day paper incubation.` });
+  log(`IV PASSED -> incubating (OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)})`);
   return { passed: true, composite: report.metrics.composite };
 }

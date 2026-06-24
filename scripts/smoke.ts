@@ -10,6 +10,8 @@ import { walkForward } from "../src/engine/walkforward";
 import type { Bars, StrategyDoc } from "../src/engine/types";
 import { generateXSection, validateXSection } from "../src/engine/xsectionGen";
 import { alignUniverse, backtestXSection, isXSection } from "../src/engine/xsection";
+import { generateIvSleeve, validateIvSleeve } from "../src/engine/ivsleeveGen";
+import { buildIvDaily, backtestIv, isIvSleeve } from "../src/engine/ivsleeve";
 
 let failures = 0;
 function check(name: string, cond: boolean, info = "") {
@@ -267,6 +269,24 @@ async function main() {
   const fbt2 = backtestXSection(fdoc, A2, { topK: fdoc.topK, rebalEvery: fdoc.rebalEvery }, 2190, { startI: fdoc.lookback + 1, endI: mid });
   let fDiff = 0; for (let i = fdoc.lookback + 2; i <= mid; i++) fDiff = Math.max(fDiff, Math.abs(fbt1.ret[i] - fbt2.ret[i]));
   check("xsection funding-rank NO look-ahead", fDiff < 1e-9, `maxDiff=${fDiff.toExponential(2)}`);
+
+  console.log("— IV-timing sleeve (options-IV) —");
+  // synthetic daily bars + synthetic DVOL series sharing day-starts
+  const ivBars = ((): Bars => { const b = synthBars(2400, 9, 0.0005); const day = b.t.map((t) => Math.floor(t / 86400000) * 86400000); return { ...b, symbol: "BTC/USDT", tf: "1d", t: day, fundingT: [], fundingR: [] } as Bars; })();
+  const dvolM = new Map<number, number>(); { const rng2 = mulberry32(3); for (let i = 0; i < ivBars.t.length; i++) dvolM.set(ivBars.t[i], 50 + 30 * Math.sin(i / 40) + rng2() * 10); }
+  const ivDaily = buildIvDaily(ivBars, dvolM, 20);
+  check("IV daily series builds (aligned DVOL)", ivDaily.t.length > 1000 && ivDaily.dvol.length === ivDaily.t.length, `n=${ivDaily.t.length}`);
+  const ivdoc = generateIvSleeve(42);
+  check("IV doc valid + long-flat + BTC/ETH only", validateIvSleeve(ivdoc).length === 0 && isIvSleeve(ivdoc) && (ivdoc.symbol === "BTC/USDT" || ivdoc.symbol === "ETH/USDT"), JSON.stringify(validateIvSleeve(ivdoc)));
+  const ivbt = backtestIv({ ...ivdoc, symbol: "BTC/USDT" }, ivDaily, { zWin: ivdoc.zWin, thresh: ivdoc.thresh });
+  check("IV backtest runs + long-flat (exposure in [0,1])", Number.isFinite(ivbt.ret[ivDaily.t.length - 1]) && ivbt.exposure >= 0 && ivbt.exposure <= 1, `exposure=${(ivbt.exposure * 100).toFixed(0)}%`);
+  // LOOK-AHEAD PROBE: corrupt future DVOL; the IV signal/return on [0,mid] must be unchanged
+  const ivMid = Math.floor(ivDaily.t.length * 0.5);
+  const ivDaily2: typeof ivDaily = { ...ivDaily, dvol: ivDaily.dvol.slice() }; for (let i = ivMid + 1; i < ivDaily2.dvol.length; i++) ivDaily2.dvol[i] *= 1.5;
+  const ivbt2 = backtestIv({ ...ivdoc, symbol: "BTC/USDT" }, ivDaily2, { zWin: ivdoc.zWin, thresh: ivdoc.thresh }, { startI: 0, endI: ivMid });
+  const ivbt1 = backtestIv({ ...ivdoc, symbol: "BTC/USDT" }, ivDaily, { zWin: ivdoc.zWin, thresh: ivdoc.thresh }, { startI: 0, endI: ivMid });
+  let ivDiff = 0; for (let i = ivdoc.rvWin + 2; i <= ivMid; i++) ivDiff = Math.max(ivDiff, Math.abs(ivbt1.ret[i] - ivbt2.ret[i]));
+  check("IV-timing NO look-ahead (future DVOL corruption doesn't change past)", ivDiff < 1e-9, `maxDiff=${ivDiff.toExponential(2)}`);
 
   console.log(failures === 0 ? "\nALL SMOKE TESTS PASSED" : `\n${failures} FAILURES`);
   process.exit(failures === 0 ? 0 : 1);

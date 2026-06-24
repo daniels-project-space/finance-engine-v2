@@ -11,6 +11,9 @@ export interface AppConfig {
    *  generateBatch proposes `perCycle` universe-wide rank sleeves that route to
    *  the adapted gauntlet (S4 skipped) + the book gate. */
   xsection?: { enabled: boolean; perCycle?: number };
+  /** IV-TIMING lane (options-IV BTC/ETH perp timing on Deribit DVOL). The first
+   *  genuinely-orthogonal sleeve family; routes to the adapted IV gauntlet + book gate. */
+  ivsleeve?: { enabled: boolean; perCycle?: number };
   primarySymbol: string;
   tf: string;
   /** ISO date string; data >= sealDate is sealed (S6 one-shot only) */
@@ -124,6 +127,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   universe: ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"],
   // cross-sectional lane DEFAULT OFF in code; shipped ON via the live override.
   xsection: { enabled: false, perCycle: 4 },
+  // IV-timing lane DEFAULT OFF in code; shipped ON via the live override.
+  ivsleeve: { enabled: false, perCycle: 2 },
   primarySymbol: "BTC/USDT",
   tf: "1h",
   sealDate: "2026-02-01",

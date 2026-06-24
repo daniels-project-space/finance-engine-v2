@@ -4,6 +4,7 @@ import { mergeConfig } from "../lib/appConfig";
 import { buildBtcBenchmark, fetchSpx } from "../lib/benchmark";
 import { aggregateBars, ingestSymbol, loadBars } from "../lib/data";
 import { candleKey, putJsonGz } from "../lib/storage";
+import { ingestDvol, DVOL_CURRENCIES } from "../lib/deribit";
 
 export const ingestCandles = schedules.task({
   id: "ingest-candles",
@@ -54,6 +55,15 @@ export const ingestCandles = schedules.task({
         if (btc) {
           await cx.mutation(api.pipeline.setConfig, { key: "benchmark_btc", json: JSON.stringify(btc) });
           logger.log(`benchmark_btc: ${btc.t.length} pts`);
+        }
+      }
+      // refresh Deribit DVOL (BTC/ETH implied-vol index) once a day — the
+      // orthogonal options-IV series for the IV-timing sleeve. Free, incremental.
+      if (new Date().getUTCHours() === 0) {
+        const historyStart = Date.parse(cfg.historyStart);
+        for (const cur of DVOL_CURRENCIES) {
+          try { const s = await ingestDvol(cur, historyStart, (m) => logger.log(m)); logger.log(`dvol ${cur}: ${s.t.length} days`); }
+          catch (e) { logger.log(`dvol ${cur} skipped: ${e instanceof Error ? e.message.slice(0, 80) : e}`); }
         }
       }
       await cx.mutation(api.pipeline.finishRun, { id: runId, status: "ok", summary: JSON.stringify(results) });
