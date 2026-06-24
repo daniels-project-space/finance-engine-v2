@@ -12,11 +12,13 @@ import { crossoverStrategies, mutateStrategy, randomStrategy, recipeOf, setIcBia
 import { icFamilyWeights, icRankingText, type IcRankedRow } from "../engine/signals";
 import { SEED_LIBRARY } from "../engine/library";
 import { IMPORTED_LIBRARY } from "../engine/imports";
-import { evaluateSealed, runGauntlet, runGauntletXSection, runGauntletIv, type GauntletReport } from "../engine/gauntlet";
+import { evaluateSealed, runGauntlet, runGauntletXSection, runGauntletIv, runGauntletOc, type GauntletReport } from "../engine/gauntlet";
 import { isXSection, alignUniverse, type XSectionDoc, type XAligned } from "../engine/xsection";
 import { generateXSection, validateXSection, xsectionHash, xsectionFamilyHash } from "../engine/xsectionGen";
 import { isIvSleeve, buildIvDaily, type IvSleeveDoc, type IvDaily } from "../engine/ivsleeve";
 import { generateIvSleeve, validateIvSleeve, ivSleeveHash, ivSleeveFamilyHash } from "../engine/ivsleeveGen";
+import { isOcSleeve, buildOcDaily, type OcSleeveDoc, type OcDaily } from "../engine/onchainsleeve";
+import { generateOcSleeve, validateOcSleeve, ocSleeveHash, ocSleeveFamilyHash } from "../engine/onchainsleeveGen";
 import { loadDvol, dvolMap, dvolCurrencyFor } from "../lib/deribit";
 import { realityCheck } from "../engine/rigor";
 import { buildBook, marginalContribution, bookQualifies, type Stream } from "../engine/book";
@@ -143,7 +145,7 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
   };
 
   const seedBase = (await cx.mutation(api.pipeline.bumpCounter, { key: "seed", by: 1 })) * 7919;
-  type Proposal = { doc: StrategyDoc | XSectionDoc | IvSleeveDoc; source: string; parentIds?: string[]; mechanism?: string; parentComposite?: number; expectedComposite?: number; wild?: boolean };
+  type Proposal = { doc: StrategyDoc | XSectionDoc | IvSleeveDoc | OcSleeveDoc; source: string; parentIds?: string[]; mechanism?: string; parentComposite?: number; expectedComposite?: number; wild?: boolean };
   const proposals: Proposal[] = [];
 
   // Library backfill: any research-backed seed or imported published strategy
@@ -239,6 +241,19 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
     }
   }
 
+  // ---- ON-CHAIN TIMING lane (MVRV/NVT valuation, the strongest sleeve found) -
+  // Long-flat BTC/ETH perp timing on the on-chain valuation regime (long when
+  // cheap). The A/B winner (BTC MVRV OOS 0.96). Routes to the adapted on-chain
+  // gauntlet + the book gate. Gated by cfg.ocsleeve.enabled.
+  if (cfg.ocsleeve?.enabled) {
+    const ocN = Math.max(1, Math.round((cfg.ocsleeve.perCycle ?? 2) * scale));
+    for (let i = 0; i < ocN; i++) {
+      const ocdoc = generateOcSleeve(seedBase + 400_000 + i);
+      proposals.push({ doc: ocdoc, source: "onchain", mechanism: "oc_valuation", expectedComposite: globalMean, wild: false });
+      summary.fresh++;
+    }
+  }
+
   // LLM lane. Anthropic goes through the subscription Claude CLI (NO API key),
   // which now runs in BOTH the VPS and the Trigger cloud image (the claude bin
   // is baked in and authed from the injected CLAUDE_CODE_OAUTH_TOKEN). On any CLI
@@ -286,6 +301,9 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
     } else if (isIvSleeve(p.doc)) {
       if (validateIvSleeve(p.doc).length > 0) continue;
       hash = ivSleeveHash(p.doc); fam = ivSleeveFamilyHash(p.doc); premium = "ivsleeve";
+    } else if (isOcSleeve(p.doc)) {
+      if (validateOcSleeve(p.doc).length > 0) continue;
+      hash = ocSleeveHash(p.doc); fam = ocSleeveFamilyHash(p.doc); premium = "onchain";
     } else {
       const sdoc = p.doc as StrategyDoc;
       if (validateStrategy(sdoc).length > 0) continue;
@@ -335,7 +353,7 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   const cand = await cx.query(api.candidates.get, { id: candidateId });
   if (!cand) throw new Error("candidate not found");
   const cfg = await getAppConfig(cx);
-  const rawDoc = JSON.parse(cand.dsl) as StrategyDoc | XSectionDoc | IvSleeveDoc;
+  const rawDoc = JSON.parse(cand.dsl) as StrategyDoc | XSectionDoc | IvSleeveDoc | OcSleeveDoc;
   const sealTs = Date.parse(cfg.sealDate);
 
   // CROSS-SECTIONAL routing: an xsection sleeve takes the adapted gauntlet path
@@ -346,6 +364,10 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   // IV-TIMING routing: a single-coin options-IV perp-timing sleeve -> IV gauntlet.
   if (isIvSleeve(rawDoc)) {
     return processIvCandidate(cx, candidateId, cand, rawDoc, cfg, sealTs, log);
+  }
+  // ON-CHAIN routing: a single-coin on-chain valuation-timing sleeve -> Oc gauntlet.
+  if (isOcSleeve(rawDoc)) {
+    return processOcCandidate(cx, candidateId, cand, rawDoc, cfg, sealTs, log);
   }
   const doc = rawDoc as StrategyDoc;
 
@@ -951,5 +973,73 @@ async function processIvCandidate(
   });
   await cx.mutation(api.pipeline.addLesson, { source: cand.source, candidateId, text: `IV PASSED: "${cand.name}" options-IV timing sleeve (OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)}, dsr ${(report.metrics.dsr ?? 0).toFixed(2)}) -> 30-day paper incubation.` });
   log(`IV PASSED -> incubating (OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)})`);
+  return { passed: true, composite: report.metrics.composite };
+}
+
+// ====================================================================
+// ON-CHAIN candidate processing (on-chain valuation-timing sleeve).
+// ====================================================================
+async function processOcCandidate(
+  cx: ConvexHttpClient,
+  candidateId: Id<"candidates">,
+  cand: { name: string; hypothesis: string; source: string; hash: string; familyHash: string },
+  doc: OcSleeveDoc,
+  cfg: AppConfig,
+  sealTs: number,
+  log: Log,
+): Promise<ProcessResult> {
+  await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "gauntlet" });
+  const ppy = 365;
+  const barsRaw = await loadBars(doc.symbol, "1d");
+  if (!barsRaw) {
+    await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: "S0-static", failedReason: "missing perp bars" });
+    return { passed: false, stage: "S0-static" };
+  }
+  // attach on-chain features (BTC/ETH only); if none, the sleeve can't run.
+  const bars = await attachOnchain(barsRaw, doc.symbol);
+  const daily: OcDaily = buildOcDaily(bars, doc.signal);
+  if (daily.t.length < 400) {
+    await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: "S0-static", failedReason: `no on-chain coverage for ${doc.symbol} (${daily.t.length} usable days)` });
+    return { passed: false, stage: "S0-static" };
+  }
+  const sealIdx = daily.t.findIndex((t) => t >= sealTs);
+  const sl = <T>(a: T[]): T[] => sealIdx >= 0 ? a.slice(sealIdx) : [];
+  const dailySealed: OcDaily | undefined = sealIdx >= 0 && daily.t.length - sealIdx > 60
+    ? { t: sl(daily.t), ret: sl(daily.ret), feat: sl(daily.feat), funding: sl(daily.funding) }
+    : undefined;
+
+  const nTrials = await cx.query(api.candidates.familySeenCount, { familyHash: cand.familyHash });
+  await cx.mutation(api.pipeline.bumpCounter, { key: "trials_total", by: 1 });
+
+  const report = runGauntletOc({ doc, daily, dailySealed, sealTs, floors: cfg.floors, nTrialsTotal: Math.max(nTrials, 40), log });
+  for (const s of report.stages) {
+    await cx.mutation(api.pipeline.addGateReport, { candidateId, stage: s.stage, passed: s.passed, reason: s.reason, report: JSON.stringify(s.detail ?? {}).slice(0, 20_000), durationMs: s.durationMs });
+  }
+  const curvesJson = JSON.stringify(report.curves ?? {});
+
+  if (!report.passed) {
+    const partial = report.metrics.wfPooledSharpe !== undefined ? 0.5 * report.metrics.wfPooledSharpe : undefined;
+    // BOOK-GATE: an on-chain sleeve that failed standalone S5oc-DSR is the
+    // orthogonal diversifier we want — route it through the same book-marginal gate.
+    if (cfg.book.marginalGate && report.failedStage === "S5oc-stats" && (report.failedReason ?? "").startsWith("DSR") && report.portfolioOos && report.portfolioOos.ret.length >= 100) {
+      try {
+        const admitted = await bookGatePromote(cx, cand, candidateId, report, cfg, ppy, log);
+        if (admitted) return { passed: true, composite: report.metrics.portOosSharpe };
+      } catch (e) { log(`oc book-gate skipped: ${e instanceof Error ? e.message.slice(0, 100) : e}`); }
+    }
+    await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: report.failedStage, failedReason: report.failedReason, metrics: JSON.stringify(report.metrics), curves: curvesJson, composite: partial });
+    await cx.mutation(api.pipeline.addLesson, { source: cand.source, candidateId, stage: report.failedStage, text: `ONCHAIN FAILED ${report.failedStage}: "${cand.name}" — ${report.failedReason}` });
+    log(`ONCHAIN FAILED at ${report.failedStage}: ${report.failedReason}`);
+    return { passed: false, stage: report.failedStage };
+  }
+
+  await cx.mutation(api.paper.ensureAccount, { candidateId, startEquity: cfg.paperStartEquity });
+  await cx.mutation(api.candidates.updateStage, {
+    id: candidateId, stage: "incubating",
+    metrics: JSON.stringify(report.metrics), bestParams: JSON.stringify(report.bestParams ?? {}),
+    curves: curvesJson, composite: report.metrics.composite ?? report.metrics.portOosSharpe, incubationStartedAt: Date.now(),
+  });
+  await cx.mutation(api.pipeline.addLesson, { source: cand.source, candidateId, text: `ONCHAIN PASSED: "${cand.name}" on-chain valuation-timing sleeve (OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)}, dsr ${(report.metrics.dsr ?? 0).toFixed(2)}) -> 30-day paper incubation.` });
+  log(`ONCHAIN PASSED -> incubating (OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)})`);
   return { passed: true, composite: report.metrics.composite };
 }

@@ -12,6 +12,8 @@ import type { Bars, StrategyDoc } from "../src/engine/types";
 import { generateXSection, validateXSection } from "../src/engine/xsectionGen";
 import { alignUniverse, backtestXSection, isXSection } from "../src/engine/xsection";
 import { generateIvSleeve, validateIvSleeve } from "../src/engine/ivsleeveGen";
+import { generateOcSleeve, validateOcSleeve } from "../src/engine/onchainsleeveGen";
+import { buildOcDaily, backtestOc, isOcSleeve } from "../src/engine/onchainsleeve";
 import { buildIvDaily, backtestIv, isIvSleeve } from "../src/engine/ivsleeve";
 
 let failures = 0;
@@ -305,6 +307,23 @@ async function main() {
   const ocInp2 = toArrays(ocBars2);
   let ocDiff = 0; for (let i = 0; i <= ocMid; i++) ocDiff = Math.max(ocDiff, Math.abs(ocInp.mvrv[i] - ocInp2.mvrv[i]), Math.abs(ocInp.exnetflow[i] - ocInp2.exnetflow[i]));
   check("on-chain NO look-ahead (future on-chain corruption doesn't change past)", ocDiff < 1e-9, `maxDiff=${ocDiff.toExponential(2)}`);
+
+  console.log("— on-chain timing sleeve —");
+  // synthetic BTC 1d bars with an mvrv series attached, valuation-timing sleeve
+  const ocSleeveBars = ((): Bars => { const b = synthBars(900, 13, 0.0004); const day = b.t.map((t) => Math.floor(t / 86400000) * 86400000); const mv = b.t.map((_, i) => 1.5 + Math.sin(i / 50)); return { ...b, symbol: "BTC/USDT", tf: "1d", t: day, fundingT: [], fundingR: [], ocMvrv: mv, ocNvt: mv.map((x) => x * 50) } as Bars; })();
+  const ocDoc = generateOcSleeve(42);
+  check("on-chain sleeve doc valid + long-flat + BTC/ETH only", validateOcSleeve(ocDoc).length === 0 && isOcSleeve(ocDoc) && (ocDoc.symbol === "BTC/USDT" || ocDoc.symbol === "ETH/USDT"), JSON.stringify(validateOcSleeve(ocDoc)));
+  const ocDaily = buildOcDaily({ ...ocSleeveBars, symbol: "BTC/USDT" }, "mvrv_cheap");
+  check("on-chain daily series builds from attached feature", ocDaily.t.length > 800 && ocDaily.feat.length === ocDaily.t.length, `n=${ocDaily.t.length}`);
+  const ocSbt = backtestOc({ ...ocDoc, symbol: "BTC/USDT", signal: "mvrv_cheap" }, ocDaily, { zWin: ocDoc.zWin, thresh: ocDoc.thresh });
+  check("on-chain backtest runs + long-flat (exposure in [0,1])", Number.isFinite(ocSbt.ret[ocDaily.t.length - 1]) && ocSbt.exposure >= 0 && ocSbt.exposure <= 1, `exposure=${(ocSbt.exposure * 100).toFixed(0)}%`);
+  // LOOK-AHEAD PROBE on the on-chain-sleeve signal (corrupt future feature -> past unchanged)
+  const ocsMid = Math.floor(ocDaily.t.length * 0.5);
+  const ocDaily2 = { ...ocDaily, feat: ocDaily.feat.slice() }; for (let i = ocsMid + 1; i < ocDaily2.feat.length; i++) ocDaily2.feat[i] = 99;
+  const ocSbt2 = backtestOc({ ...ocDoc, symbol: "BTC/USDT", signal: "mvrv_cheap" }, ocDaily2, { zWin: ocDoc.zWin, thresh: ocDoc.thresh }, { startI: 0, endI: ocsMid });
+  const ocSbt1 = backtestOc({ ...ocDoc, symbol: "BTC/USDT", signal: "mvrv_cheap" }, ocDaily, { zWin: ocDoc.zWin, thresh: ocDoc.thresh }, { startI: 0, endI: ocsMid });
+  let ocsDiff = 0; for (let i = ocDoc.zWin + 2; i <= ocsMid; i++) ocsDiff = Math.max(ocsDiff, Math.abs(ocSbt1.ret[i] - ocSbt2.ret[i]));
+  check("on-chain-sleeve NO look-ahead (future feature corruption doesn't change past)", ocsDiff < 1e-9, `maxDiff=${ocsDiff.toExponential(2)}`);
 
   console.log(failures === 0 ? "\nALL SMOKE TESTS PASSED" : `\n${failures} FAILURES`);
   process.exit(failures === 0 ? 0 : 1);
