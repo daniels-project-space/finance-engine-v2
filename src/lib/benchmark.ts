@@ -1,6 +1,7 @@
-// S&P 500 benchmark series for dashboard overlays.
-// Primary: FRED CSV (keyless, stable). Fallback: Yahoo v8 chart JSON.
-// Stored in Convex config as {t: ms[], c: close[]}.
+// Benchmark series for dashboard overlays.
+// SPX — Primary: FRED CSV (keyless, stable). Fallback: Yahoo v8 chart JSON.
+// BTC buy-and-hold — built from the engine's own ingested BTC/USDT 1d closes.
+// Both stored in Convex config as {t: ms[], c: close[]}.
 
 export interface Benchmark { t: number[]; c: number[] }
 
@@ -21,8 +22,12 @@ async function fromFred(): Promise<Benchmark> {
   for (const line of csv.split("\n").slice(1)) {
     const [d, v] = line.trim().split(",");
     const ts = Date.parse(d);
+    // FRED emits an empty value field for market holidays (e.g. "2022-05-30,").
+    // Number("") === 0, which would pass an isFinite check and poison rebasing —
+    // so reject anything that isn't a positive close.
+    if (v === undefined || v === "" || v === ".") continue;
     const close = Number(v);
-    if (!Number.isFinite(ts) || !Number.isFinite(close) || ts < cutoff) continue;
+    if (!Number.isFinite(ts) || !Number.isFinite(close) || close <= 0 || ts < cutoff) continue;
     t.push(ts); c.push(close);
   }
   if (t.length < 200) throw new Error(`fred only ${t.length} rows`);
@@ -37,7 +42,7 @@ async function fromYahoo(): Promise<Benchmark> {
   const t: number[] = [], c: number[] = [];
   for (let i = 0; i < r.timestamp.length; i++) {
     const close = r.indicators.quote[0].close[i];
-    if (close == null) continue;
+    if (close == null || !Number.isFinite(close) || close <= 0) continue;
     t.push(r.timestamp[i] * 1000); c.push(close);
   }
   if (t.length < 200) throw new Error(`yahoo only ${t.length} rows`);
@@ -52,4 +57,22 @@ export async function fetchSpx(log?: (m: string) => void): Promise<Benchmark | n
       return null;
     }
   }
+}
+
+/**
+ * BTC buy-and-hold benchmark from the engine's own ingested 1d closes.
+ * No external source — same {t, c} shape and 6-year window as SPX, so the
+ * dashboard can rebase it to any chart period exactly like the SPX overlay.
+ */
+export function buildBtcBenchmark(bars: { t: number[]; c: number[] } | null): Benchmark | null {
+  if (!bars || !bars.t?.length) return null;
+  const cutoff = Date.now() - 6 * 365 * 86_400_000;
+  const t: number[] = [], c: number[] = [];
+  for (let i = 0; i < bars.t.length; i++) {
+    const ts = bars.t[i], close = bars.c[i];
+    if (!Number.isFinite(ts) || !Number.isFinite(close) || close <= 0 || ts < cutoff) continue;
+    t.push(ts); c.push(close);
+  }
+  if (t.length < 50) return null;
+  return downsample(t, c);
 }

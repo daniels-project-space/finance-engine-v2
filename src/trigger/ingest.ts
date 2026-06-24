@@ -1,7 +1,7 @@
 import { logger, schedules } from "@trigger.dev/sdk";
 import { api, convex } from "../lib/convexClient";
 import { mergeConfig } from "../lib/appConfig";
-import { fetchSpx } from "../lib/benchmark";
+import { buildBtcBenchmark, fetchSpx } from "../lib/benchmark";
 import { aggregateBars, ingestSymbol, loadBars } from "../lib/data";
 import { candleKey, putJsonGz } from "../lib/storage";
 
@@ -39,10 +39,22 @@ export const ingestCandles = schedules.task({
           });
         }
       }
-      // refresh S&P 500 benchmark once a day (~midnight pass)
-      if (new Date().getUTCHours() === 0 || !(await cx.query(api.pipeline.getConfig, { key: "benchmark_spx" }))) {
+      // refresh benchmarks once a day (~midnight pass), or whenever missing.
+      // SPX from FRED/Yahoo; BTC buy-and-hold from our own ingested 1d closes —
+      // both rebased client-side onto each chart's window for "beats both".
+      const refreshSpx = new Date().getUTCHours() === 0 || !(await cx.query(api.pipeline.getConfig, { key: "benchmark_spx" }));
+      const refreshBtc = new Date().getUTCHours() === 0 || !(await cx.query(api.pipeline.getConfig, { key: "benchmark_btc" }));
+      if (refreshSpx) {
         const spx = await fetchSpx((m) => logger.log(m));
         if (spx) await cx.mutation(api.pipeline.setConfig, { key: "benchmark_spx", json: JSON.stringify(spx) });
+      }
+      if (refreshBtc) {
+        const btcBars = await loadBars("BTC/USDT", "1d");
+        const btc = buildBtcBenchmark(btcBars);
+        if (btc) {
+          await cx.mutation(api.pipeline.setConfig, { key: "benchmark_btc", json: JSON.stringify(btc) });
+          logger.log(`benchmark_btc: ${btc.t.length} pts`);
+        }
       }
       await cx.mutation(api.pipeline.finishRun, { id: runId, status: "ok", summary: JSON.stringify(results) });
       return results;

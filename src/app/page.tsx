@@ -24,6 +24,7 @@ export default function Overview() {
   const trials = useQuery(api.pipeline.getCounter, { key: "trials_total" });
   const llmSpend = useQuery(api.pipeline.getCounter, { key: `llm_usd_cents:${new Date().toISOString().slice(0, 10)}` });
   const spxRaw = useQuery(api.pipeline.getConfig, { key: "benchmark_spx" });
+  const btcRaw = useQuery(api.pipeline.getConfig, { key: "benchmark_btc" });
 
   const leader = champion ?? board?.[0];
   const leaderMetrics = leader?.metrics ? (JSON.parse(leader.metrics) as Record<string, number>) : {};
@@ -32,26 +33,37 @@ export default function Overview() {
   const bestComposite = Math.max(0, ...(board ?? []).map((b) => b.composite ?? 0));
 
   // headline curve = the most deployment-like validated curve available,
-  // benchmarked against the S&P 500 rebased to the same start
+  // benchmarked against the S&P 500 AND BTC buy-and-hold, both rebased to the
+  // same window so the strategy is judged against beating BOTH references.
   const headline = leaderCurves.port ?? leaderCurves.wf ?? leaderCurves.full;
-  let spxCurve: Curve | undefined;
-  if (spxRaw && headline?.t?.length) {
+  // Rebase a {t,c} benchmark to growth-of-1 over the headline window. Skips
+  // non-positive closes (FRED stores 0 on market holidays) so a single bad row
+  // can't NaN-poison the chart — the bug that made the S&P line never render.
+  const rebaseBenchmark = (raw: string | null | undefined): Curve | undefined => {
+    if (!raw || !headline?.t?.length) return undefined;
     try {
-      const spx = JSON.parse(spxRaw) as { t: number[]; c: number[] };
+      const b = JSON.parse(raw) as { t: number[]; c: number[] };
       const t0 = headline.t[0], t1 = headline.t[headline.t.length - 1];
       const t: number[] = [], eq: number[] = [];
       let base = 0;
-      for (let i = 0; i < spx.t.length; i++) {
-        if (spx.t[i] < t0 || spx.t[i] > t1) continue;
-        if (!base) base = spx.c[i];
-        t.push(spx.t[i]); eq.push(spx.c[i] / base);
+      for (let i = 0; i < b.t.length; i++) {
+        const ts = b.t[i], close = b.c[i];
+        if (ts < t0 || ts > t1) continue;
+        if (!Number.isFinite(close) || close <= 0) continue;
+        if (!base) base = close;
+        t.push(ts); eq.push(close / base);
       }
-      if (t.length > 2) spxCurve = { t, eq };
-    } catch { /* no benchmark */ }
-  }
+      return t.length > 2 ? { t, eq } : undefined;
+    } catch { return undefined; }
+  };
+  const spxCurve = rebaseBenchmark(spxRaw);
+  const btcCurve = rebaseBenchmark(btcRaw);
   const headlineLabel = leaderCurves.port ? "strategy — 5-pair portfolio, out-of-sample" : leaderCurves.wf ? "strategy — BTC walk-forward, out-of-sample" : "strategy — full backtest";
   const stratMult = headline?.eq?.length ? headline.eq[headline.eq.length - 1] : undefined;
   const spxMult = spxCurve?.eq?.length ? spxCurve.eq[spxCurve.eq.length - 1] : undefined;
+  const btcMult = btcCurve?.eq?.length ? btcCurve.eq[btcCurve.eq.length - 1] : undefined;
+  const beatsSpx = stratMult !== undefined && spxMult !== undefined ? stratMult > spxMult : undefined;
+  const beatsBtc = stratMult !== undefined && btcMult !== undefined ? stratMult > btcMult : undefined;
 
   const alive = funnel ? (funnel.incubating ?? 0) + (funnel.eligible ?? 0) + (funnel.champion ?? 0) + (funnel.sealed_passed ?? 0) : 0;
 
@@ -115,12 +127,29 @@ export default function Overview() {
                 <LineChart series={[
                   { name: headlineLabel, color: "#2dd4a7", curve: headline },
                   ...(spxCurve ? [{ name: "S&P 500 (same period)", color: "#9fb0bd", curve: spxCurve }] : []),
+                  ...(btcCurve ? [{ name: "BTC buy & hold (same period)", color: "#e8b34b", curve: btcCurve }] : []),
                 ]} height={230} yLabel="growth of 1" />
                 {stratMult !== undefined && (
                   <p className="num text-[11px] text-dim mt-1">
                     $10k → <span className="text-up">${(stratMult * 10000).toFixed(0)}</span> with this strategy
-                    {spxMult !== undefined && <> vs <span className="text-fg">${(spxMult * 10000).toFixed(0)}</span> in the S&P 500</>} over the validated window
+                    {spxMult !== undefined && <> vs <span className="text-fg">${(spxMult * 10000).toFixed(0)}</span> S&P 500</>}
+                    {btcMult !== undefined && <> vs <span className="text-gold">${(btcMult * 10000).toFixed(0)}</span> BTC buy &amp; hold</>} over the validated window
                   </p>
+                )}
+                {(beatsSpx !== undefined || beatsBtc !== undefined) && (
+                  <div className="flex items-center gap-3 mt-1.5">
+                    <span className="hud">reference bar</span>
+                    {beatsSpx !== undefined && (
+                      <span className={`num text-[10px] px-1.5 py-0.5 rounded border ${beatsSpx ? "text-up border-up/40" : "text-down border-down/40"}`}>
+                        {beatsSpx ? "✓ beats" : "✗ trails"} S&P 500
+                      </span>
+                    )}
+                    {beatsBtc !== undefined && (
+                      <span className={`num text-[10px] px-1.5 py-0.5 rounded border ${beatsBtc ? "text-up border-up/40" : "text-down border-down/40"}`}>
+                        {beatsBtc ? "✓ beats" : "✗ trails"} BTC buy &amp; hold
+                      </span>
+                    )}
+                  </div>
                 )}
               </>
             )}
