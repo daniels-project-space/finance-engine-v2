@@ -96,6 +96,8 @@ export function alignUniverse(barsList: { symbol: string; bars: Bars }[]): XAlig
       f: pick(fullInp.f), fundroc: pick(fullInp.fundroc), fundzscore: pick(fullInp.fundzscore),
       fundaccel: pick(fullInp.fundaccel), fundmom: pick(fullInp.fundmom), basis: pick(fullInp.basis),
       oi: pick(fullInp.oi), lsr: pick(fullInp.lsr), hour: pick(fullInp.hour), dow: pick(fullInp.dow),
+      mvrv: pick(fullInp.mvrv), activeaddr: pick(fullInp.activeaddr), txcnt: pick(fullInp.txcnt),
+      nvt: pick(fullInp.nvt), exnetflow: pick(fullInp.exnetflow), stablesupply: pick(fullInp.stablesupply),
     });
   }
   return { t: base, symbols: barsList.map((b) => b.symbol), close, ret, funding, inp };

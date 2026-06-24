@@ -5,7 +5,7 @@ import type { ConvexHttpClient } from "convex/browser";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { mergeConfig, todayKey, type AppConfig } from "../lib/appConfig";
-import { loadBars } from "../lib/data";
+import { loadBars, attachOnchain } from "../lib/data";
 import { artifactKey, putJsonGz, getJsonGz } from "../lib/storage";
 import { canonicalHash, familyHash, validateStrategy } from "../engine/dsl";
 import { crossoverStrategies, mutateStrategy, randomStrategy, recipeOf, setIcBias, MUTATION_OPS, type MutationHint, type MutationOp } from "../engine/evolve";
@@ -405,8 +405,12 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   // per-strategy timeframe: data + thresholds follow the candidate's tf
   const tf = doc.tf ?? (cfg.tf as "1h");
   const ppy = PPY[tf] ?? 8760;
-  const primary = await loadBars(cfg.primarySymbol, tf);
+  let primary = await loadBars(cfg.primarySymbol, tf);
   if (!primary || primary.t.length < ppy * 2.2) throw new Error(`primary ${tf} bars missing/short — run ingest first`);
+  // ON-CHAIN: attach forward-filled, lagged on-chain features to the primary so
+  // strategies using mvrv/activeaddr/nvt/exnetflow/stablesupply can read them
+  // (BTC/ETH-only coverage; no-op for other symbols). Gated by cfg.onchain.enabled.
+  if (cfg.onchain?.enabled) primary = await attachOnchain(primary, cfg.primarySymbol);
   // S4 SUBSET CAP: the live universe is now ~24 perps, so validating the S4
   // cross-symbol loop against ALL of them would run ~23 per-symbol walk-forwards
   // per candidate and blow the 1700s gauntletTask ceiling. Cap S4 to a fixed

@@ -3,6 +3,7 @@
 // determinism, walk-forward mechanics, and an explicit look-ahead probe.
 
 import { runBacktest } from "../src/engine/backtest";
+import { toArrays } from "../src/engine/compile";
 import { canonicalHash, familyHash, validateStrategy } from "../src/engine/dsl";
 import { mutateStrategy, randomStrategy } from "../src/engine/evolve";
 import { dsr, mulberry32, permutationTest } from "../src/engine/stats";
@@ -287,6 +288,23 @@ async function main() {
   const ivbt1 = backtestIv({ ...ivdoc, symbol: "BTC/USDT" }, ivDaily, { zWin: ivdoc.zWin, thresh: ivdoc.thresh }, { startI: 0, endI: ivMid });
   let ivDiff = 0; for (let i = ivdoc.rvWin + 2; i <= ivMid; i++) ivDiff = Math.max(ivDiff, Math.abs(ivbt1.ret[i] - ivbt2.ret[i]));
   check("IV-timing NO look-ahead (future DVOL corruption doesn't change past)", ivDiff < 1e-9, `maxDiff=${ivDiff.toExponential(2)}`);
+
+  console.log("— on-chain features —");
+  // on-chain DSL ops exist + compile + are usable in a strategy expression
+  const ocOps = ["mvrv", "activeaddr", "txcnt", "nvt", "exnetflow", "stablesupply"] as const;
+  const ocBars = ((): Bars => { const b = synthBars(800, 11, 0.0004); const day = b.t.map((t) => Math.floor(t / 86400000) * 86400000); const oc = b.t.map((_, i) => 1 + Math.sin(i / 30)); return { ...b, symbol: "BTC/USDT", tf: "1d", t: day, fundingT: [], fundingR: [], ocMvrv: oc.slice(), ocActiveAddr: oc.map((x) => x * 1e6), ocTxCnt: oc.map((x) => x * 2e5), ocNvt: oc.slice(), ocExNetflow: oc.map((x) => x - 1), ocStableSupply: oc.map((x) => x * 1e11) } as Bars; })();
+  const ocInp = toArrays(ocBars);
+  let ocAllPresent = true; for (const op of ocOps) { const v = (ocInp as unknown as Record<string, Float64Array>)[op]; if (!v || v.length !== ocBars.t.length) ocAllPresent = false; }
+  check("on-chain inputs compile into CompiledInputs", ocAllPresent, ocOps.join(","));
+  const ocStrat: StrategyDoc = { name: "oc", hypothesis: "mvrv valuation regime entry", tf: "1d", longEntry: { op: "lt", a: { op: "mvrv" }, b: { op: "const", value: 1.5 } }, longExit: { op: "gt", a: { op: "mvrv" }, b: { op: "const", value: 2.5 } }, params: {}, risk: { volTargetAnnual: 0.3, maxLeverage: 2 } };
+  check("strategy using on-chain op validates + runs", validateStrategy(ocStrat).length === 0 && runBacktest(ocStrat, ocBars, {}, opts).ret.length === ocBars.t.length, JSON.stringify(validateStrategy(ocStrat)));
+  // LOOK-AHEAD PROBE: corrupt future on-chain values; toArrays() of [0,mid] must be unchanged
+  const ocMid = Math.floor(ocBars.t.length * 0.5);
+  const ocBars2: Bars = { ...ocBars, ocMvrv: ocBars.ocMvrv!.slice(), ocExNetflow: ocBars.ocExNetflow!.slice() };
+  for (let i = ocMid + 1; i < ocBars2.t.length; i++) { ocBars2.ocMvrv![i] = 99; ocBars2.ocExNetflow![i] = 99; }
+  const ocInp2 = toArrays(ocBars2);
+  let ocDiff = 0; for (let i = 0; i <= ocMid; i++) ocDiff = Math.max(ocDiff, Math.abs(ocInp.mvrv[i] - ocInp2.mvrv[i]), Math.abs(ocInp.exnetflow[i] - ocInp2.exnetflow[i]));
+  check("on-chain NO look-ahead (future on-chain corruption doesn't change past)", ocDiff < 1e-9, `maxDiff=${ocDiff.toExponential(2)}`);
 
   console.log(failures === 0 ? "\nALL SMOKE TESTS PASSED" : `\n${failures} FAILURES`);
   process.exit(failures === 0 ? 0 : 1);

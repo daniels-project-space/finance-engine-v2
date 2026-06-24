@@ -5,6 +5,8 @@ import { buildBtcBenchmark, fetchSpx } from "../lib/benchmark";
 import { aggregateBars, ingestSymbol, loadBars } from "../lib/data";
 import { candleKey, putJsonGz } from "../lib/storage";
 import { ingestDvol, DVOL_CURRENCIES } from "../lib/deribit";
+import { ingestOnchain, ONCHAIN_ASSETS } from "../lib/coinmetrics";
+import { ingestStablecoins } from "../lib/defillama";
 
 export const ingestCandles = schedules.task({
   id: "ingest-candles",
@@ -65,6 +67,13 @@ export const ingestCandles = schedules.task({
           try { const s = await ingestDvol(cur, historyStart, (m) => logger.log(m)); logger.log(`dvol ${cur}: ${s.t.length} days`); }
           catch (e) { logger.log(`dvol ${cur} skipped: ${e instanceof Error ? e.message.slice(0, 80) : e}`); }
         }
+        // refresh ON-CHAIN (Coin Metrics community + DefiLlama stablecoins), daily.
+        for (const a of ONCHAIN_ASSETS) {
+          try { const s = await ingestOnchain(a, historyStart, (m) => logger.log(m)); logger.log(`onchain ${a}: ${s.t.length} days`); }
+          catch (e) { logger.log(`onchain ${a} skipped: ${e instanceof Error ? e.message.slice(0, 80) : e}`); }
+        }
+        try { const st = await ingestStablecoins((m) => logger.log(m)); logger.log(`stablesupply: ${st.t.length} days`); }
+        catch (e) { logger.log(`stablesupply skipped: ${e instanceof Error ? e.message.slice(0, 80) : e}`); }
       }
       await cx.mutation(api.pipeline.finishRun, { id: runId, status: "ok", summary: JSON.stringify(results) });
       return results;

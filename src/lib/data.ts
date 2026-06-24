@@ -20,6 +20,43 @@ export async function loadBars(symbol: string, tf: string): Promise<Bars | null>
   return getJsonGz<Bars>(candleKey(symbol, tf));
 }
 
+/**
+ * Attach on-chain features to bars (forward-filled per bar from the daily,
+ * already-LAGGED on-chain maps). Returns a NEW Bars with oc* arrays of length t,
+ * or the original bars unchanged if there is no on-chain coverage for the symbol.
+ * POINT-IN-TIME: the feature maps are pre-lagged (key = publish-day), and we
+ * forward-fill the last value whose key <= bar timestamp — so a bar at time t only
+ * ever reads on-chain values that were published by t. No look-ahead.
+ */
+export async function attachOnchain(bars: Bars, symbol: string): Promise<Bars> {
+  const { onchainAssetFor, loadOnchain, onchainFeatureMap } = await import("./coinmetrics");
+  const { loadStablecoins, stableMap } = await import("./defillama");
+  const asset = onchainAssetFor(symbol);
+  const stableSeries = await loadStablecoins();
+  if (!asset && !stableSeries) return bars;
+
+  // build sorted (day -> features) entries for the per-asset metrics
+  let ocEntries: [number, Record<string, number>][] = [];
+  if (asset) { const s = await loadOnchain(asset); if (s) ocEntries = [...onchainFeatureMap(s).entries()].sort((a, b) => a[0] - b[0]); }
+  const stableEntries = stableSeries ? [...stableMap(stableSeries).entries()].sort((a, b) => a[0] - b[0]) : [];
+  if (ocEntries.length === 0 && stableEntries.length === 0) return bars;
+
+  const n = bars.t.length;
+  const mk = () => new Array<number>(n).fill(0);
+  const ocMvrv = mk(), ocActiveAddr = mk(), ocTxCnt = mk(), ocNvt = mk(), ocExNetflow = mk(), ocStableSupply = mk();
+  // forward-fill: pointer walks the sorted entries, never reading a key > bar.t[i]
+  let oi = 0, last: Record<string, number> = {};
+  let si = 0, lastStable = 0;
+  for (let i = 0; i < n; i++) {
+    const t = bars.t[i];
+    while (oi < ocEntries.length && ocEntries[oi][0] <= t) { last = ocEntries[oi][1]; oi++; }
+    while (si < stableEntries.length && stableEntries[si][0] <= t) { lastStable = stableEntries[si][1]; si++; }
+    ocMvrv[i] = last.mvrv ?? 0; ocActiveAddr[i] = last.activeaddr ?? 0; ocTxCnt[i] = last.txcnt ?? 0;
+    ocNvt[i] = last.nvt ?? 0; ocExNetflow[i] = last.exnetflow ?? 0; ocStableSupply[i] = lastStable;
+  }
+  return { ...bars, ocMvrv, ocActiveAddr, ocTxCnt, ocNvt, ocExNetflow, ocStableSupply };
+}
+
 export interface IngestResult {
   symbol: string; tf: string; bars: number; appended: number; gaps: number;
   firstTs: number; lastTs: number; fundingLastTs?: number; source: string;

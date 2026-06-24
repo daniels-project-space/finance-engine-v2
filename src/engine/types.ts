@@ -25,6 +25,14 @@ export type Expr =
   | { op: "lsr" }       // taker long/short volume ratio, last-known per bar (positioning)
   | { op: "hourutc" } // bar-open hour in UTC, 0-23 (intraday seasonality)
   | { op: "dowutc" }  // bar-open day of week UTC, 0=Sun..6=Sat (calendar seasonality)
+  // ---- ON-CHAIN inputs (daily, BTC/ETH only; forward-filled per bar, LAGGED
+  // ---- ~1d for point-in-time; 0 before first stamp / for coins without coverage)
+  | { op: "mvrv" }       // CapMVRVCur — market-value-to-realized-value (valuation)
+  | { op: "activeaddr" } // AdrActCnt — active addresses (network activity)
+  | { op: "txcnt" }      // TxCnt — transaction count (network activity)
+  | { op: "nvt" }        // network-value-to-transactions (mktcap / txcnt)
+  | { op: "exnetflow" }  // exchange net flow (in-out, native): + = inflow, - = outflow
+  | { op: "stablesupply" } // DefiLlama total stablecoin circulating USD (macro liquidity)
   | { op: "const"; value: number }
   | { op: "param"; name: string }
   | { op: IndicatorOp; src: Expr; period: Expr }
@@ -88,6 +96,14 @@ export interface Bars {
   /** taker long/short volume ratio stamps (ms) + ratio, ~5min cadence from the metrics archive */
   lsrT?: number[];
   lsrR?: number[];
+  // ---- ON-CHAIN per-bar features (daily, BTC/ETH only; forward-filled + LAGGED
+  // ---- ~1d for point-in-time. Same length as t when present, else absent.) ----
+  ocMvrv?: number[];
+  ocActiveAddr?: number[];
+  ocTxCnt?: number[];
+  ocNvt?: number[];
+  ocExNetflow?: number[];
+  ocStableSupply?: number[];
 }
 
 export interface CostModel {

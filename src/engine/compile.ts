@@ -23,6 +23,13 @@ export interface CompiledInputs {
   /** bar-open hour UTC (0-23) and day-of-week UTC (0=Sun..6=Sat) */
   hour: Float64Array;
   dow: Float64Array;
+  // ---- ON-CHAIN per-bar inputs (forward-filled from daily, LAGGED ~1d; 0 absent) ----
+  mvrv: Float64Array;
+  activeaddr: Float64Array;
+  txcnt: Float64Array;
+  nvt: Float64Array;
+  exnetflow: Float64Array;
+  stablesupply: Float64Array;
 }
 
 /** trailing windows (in FUNDING STAMPS, ~3/day) for the funding-dynamics inputs. */
@@ -98,10 +105,14 @@ export function toArrays(bars: Bars): CompiledInputs {
     hour[i] = Math.floor(bars.t[i] / 3_600_000) % 24;
     dow[i] = (days + 4) % 7; // epoch day 0 was a Thursday
   }
+  // ON-CHAIN: already attached per-bar (forward-filled + LAGGED at ingest); 0 when absent.
+  const ocOf = (a?: number[]): Float64Array => a && a.length === n ? Float64Array.from(a) : new Float64Array(n);
   return {
     o: Float64Array.from(bars.o), h: Float64Array.from(bars.h),
     l: Float64Array.from(bars.l), c: Float64Array.from(bars.c), v: Float64Array.from(bars.v),
     f, fundroc, fundzscore, fundaccel, fundmom, basis, oi, lsr, hour, dow,
+    mvrv: ocOf(bars.ocMvrv), activeaddr: ocOf(bars.ocActiveAddr), txcnt: ocOf(bars.ocTxCnt),
+    nvt: ocOf(bars.ocNvt), exnetflow: ocOf(bars.ocExNetflow), stablesupply: ocOf(bars.ocStableSupply),
   };
 }
 
@@ -133,6 +144,7 @@ function key(e: Expr, params: Record<string, number>): string {
     case "funding": case "hourutc": case "dowutc":
     case "fundroc": case "fundzscore": case "fundaccel": case "fundmom":
     case "basis": case "oi": case "lsr":
+    case "mvrv": case "activeaddr": case "txcnt": case "nvt": case "exnetflow": case "stablesupply":
       return n.op;
     case "const": return `c:${n.value}`;
     case "param": return `pv:${params[n.name as string]}`;
@@ -168,6 +180,12 @@ export function evalNum(e: Expr, inp: CompiledInputs, params: Record<string, num
     case "lsr": { out = inp.lsr; break; }
     case "hourutc": { out = inp.hour; break; }
     case "dowutc": { out = inp.dow; break; }
+    case "mvrv": { out = inp.mvrv; break; }
+    case "activeaddr": { out = inp.activeaddr; break; }
+    case "txcnt": { out = inp.txcnt; break; }
+    case "nvt": { out = inp.nvt; break; }
+    case "exnetflow": { out = inp.exnetflow; break; }
+    case "stablesupply": { out = inp.stablesupply; break; }
     case "const": { out = new Float64Array(len).fill(n.value as number); break; }
     case "param": { out = new Float64Array(len).fill(params[n.name as string]); break; }
     case "ema": case "sma": case "wma": case "rsi": case "stdev": case "highest": case "lowest":

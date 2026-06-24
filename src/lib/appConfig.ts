@@ -14,6 +14,10 @@ export interface AppConfig {
   /** IV-TIMING lane (options-IV BTC/ETH perp timing on Deribit DVOL). The first
    *  genuinely-orthogonal sleeve family; routes to the adapted IV gauntlet + book gate. */
   ivsleeve?: { enabled: boolean; perCycle?: number };
+  /** ON-CHAIN feature inputs (Coin Metrics community + DefiLlama, daily BTC/ETH).
+   *  When enabled, on-chain features are attached to the primary bars so strategies
+   *  can use mvrv/activeaddr/txcnt/nvt/exnetflow/stablesupply DSL ops. */
+  onchain?: { enabled: boolean };
   primarySymbol: string;
   tf: string;
   /** ISO date string; data >= sealDate is sealed (S6 one-shot only) */
@@ -129,6 +133,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   xsection: { enabled: false, perCycle: 4 },
   // IV-timing lane DEFAULT OFF in code; shipped ON via the live override.
   ivsleeve: { enabled: false, perCycle: 2 },
+  // ON-CHAIN features DEFAULT OFF in code; shipped ON via the live override.
+  onchain: { enabled: false },
   primarySymbol: "BTC/USDT",
   tf: "1h",
   sealDate: "2026-02-01",

@@ -13,6 +13,8 @@ const COMMUTATIVE = new Set(["add", "mul", "min2", "max2", "and", "or"]);
 const NULLARY_NUM = new Set([
   "funding", "hourutc", "dowutc",
   "fundroc", "fundzscore", "fundaccel", "fundmom", "basis", "oi", "lsr",
+  // on-chain leaf inputs (daily, BTC/ETH; forward-filled + lagged)
+  "mvrv", "activeaddr", "txcnt", "nvt", "exnetflow", "stablesupply",
 ]);
 
 export type ExprKind = "num" | "bool";
