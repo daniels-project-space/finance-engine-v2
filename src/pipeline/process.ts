@@ -809,12 +809,27 @@ async function bookGatePromote(
     minBookSharpe: b.bookMinSharpe, minBookDeflatedSharpe: b.bookMinDeflated, maxMeanAbsCorr: b.bookMaxMeanCorr,
   });
   log(`book-gate "${cand.name}": A=pass B=${B.reason} | book(${C.nMembers}) sharpe=${C.bookSharpe.toFixed(2)} deflated=${C.bookDeflatedSharpe.toFixed(2)} divRatio=${C.diversificationRatio.toFixed(2)} meanCorr=${C.meanAbsCorr.toFixed(2)} -> C=${C.passes ? "PASS" : "FAIL"}${C.passes ? "" : " (" + C.reasons.join("; ") + ")"}`);
-  if (!C.passes) return false;
+
+  // FORWARD-PAPER PATH: (A) significance + (B) diversification already proved this
+  // is an HONEST, book-accretive sleeve (not noise, not overfit). The book-level
+  // deflated-1.0 bar (C) is the REAL-MONEY standard; we do NOT require it to start
+  // PAPER forward-testing. If forwardPaper is on, admit to paper even when (C)
+  // fails — capped at forwardPaperMaxSleeves so the paper book stays diversified-
+  // sized, not a dumping ground. If (C) passes it's a full book member as before.
+  // Real-money graduation (paper -> eligible -> champion) stays strict downstream.
+  const forwardOnly = !C.passes;
+  if (forwardOnly) {
+    if (!b.forwardPaper) return false;                       // forward-paper disabled => keep the strict wall
+    if (memberStreams.length >= b.forwardPaperMaxSleeves) {
+      log(`forward-paper full (${memberStreams.length}/${b.forwardPaperMaxSleeves}) — not admitting "${cand.name}"`);
+      return false;
+    }
+  }
 
   // ---- ADMIT: persist the enlarged book + route to paper incubation ----------
   const newAdmitted: AdmittedSleeve[] = [...admitted, { id: candidateId as string, name: cand.name, t: oos.t, ret: oos.ret }];
   await putJsonGz(ADMITTED_BOOK_KEY, newAdmitted);
-  const metrics = { ...report.metrics, bookAdmitted: 1, bookSharpe: C.bookSharpe, bookDeflated: C.bookDeflatedSharpe, bookDivRatio: C.diversificationRatio, marginalBookSharpe: B.marginal.marginalSharpe, maxBookCorr: B.marginal.maxCorr };
+  const metrics = { ...report.metrics, bookAdmitted: 1, forwardPaper: forwardOnly ? 1 : 0, bookSharpe: C.bookSharpe, bookDeflated: C.bookDeflatedSharpe, bookDivRatio: C.diversificationRatio, marginalBookSharpe: B.marginal.marginalSharpe, maxBookCorr: B.marginal.maxCorr };
   await cx.mutation(api.paper.ensureAccount, { candidateId, startEquity: cfg.paperStartEquity });
   await cx.mutation(api.candidates.updateStage, {
     id: candidateId, stage: "incubating",
@@ -824,9 +839,11 @@ async function bookGatePromote(
   });
   await cx.mutation(api.pipeline.addLesson, {
     source: cand.source, candidateId,
-    text: `BOOK-ADMITTED: "${cand.name}" failed standalone S5-DSR but joined the diversified book (book Sharpe ${C.bookSharpe.toFixed(2)}, deflated ${C.bookDeflatedSharpe.toFixed(2)}, divRatio ${C.diversificationRatio.toFixed(2)}, ${C.nMembers} sleeves). Entered 30-day paper incubation as a book component.`,
+    text: forwardOnly
+      ? `FORWARD-PAPER: "${cand.name}" passed the real significance battery (bootCI>0, deflated(p5) ${A.deflatedSharpe.toFixed(2)}, perm/PBO) + is book-accretive (marg ${B.marginal.marginalSharpe.toFixed(2)}, corr ${B.marginal.maxCorr.toFixed(2)}) but the book is below the deflated-1.0 real-money bar. Routed to PAPER forward-testing to build a live track record. Real-money promotion stays strict.`
+      : `BOOK-ADMITTED: "${cand.name}" failed standalone S5-DSR but joined the diversified book (book Sharpe ${C.bookSharpe.toFixed(2)}, deflated ${C.bookDeflatedSharpe.toFixed(2)}, divRatio ${C.diversificationRatio.toFixed(2)}, ${C.nMembers} sleeves). Entered 30-day paper incubation as a book component.`,
   });
-  log(`BOOK-ADMITTED -> incubating: "${cand.name}" (book now ${C.nMembers} sleeves, Sharpe ${C.bookSharpe.toFixed(2)})`);
+  log(`${forwardOnly ? "FORWARD-PAPER" : "BOOK-ADMITTED"} -> incubating: "${cand.name}" (paper book now ${newAdmitted.length} sleeves)`);
   return true;
 }
 

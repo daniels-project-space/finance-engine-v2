@@ -245,3 +245,77 @@ export const dataSources = query({
     };
   },
 });
+
+/**
+ * PAPER BOOK — the live forward-test track record (the moving headline). Every
+ * incubating/eligible/champion sleeve is paper-traded forward hourly. We return:
+ *  - per-sleeve forward equity/return/Sharpe/days/maxDD (which hold up vs decay),
+ *  - the COMBINED equal-weight paper-book equity curve + forward Sharpe.
+ * PAPER = simulated, no real money. Forward Sharpe shown only once enough bars
+ * exist ("warming" otherwise) — honest about how young the track record is.
+ */
+export const paperBook = query({
+  args: {},
+  handler: async (ctx) => {
+    const stages = ["incubating", "eligible", "champion"];
+    const sleeves: { id: string; name: string; source: string; family: string; forwardSeed: boolean; startEq: number; equity: number; peak: number; days: number; ret: number; sharpe: number | null; maxDD: number; halted: boolean; bars: number; spark: number[] }[] = [];
+    const PPY = 8760; // hourly paper steps
+    const fam = (s: string) => s === "xsection" ? "Cross-sectional" : s === "ivsleeve" ? "IV-timing" : s === "onchain" ? "On-chain" : "DSL";
+    // collect all snapshots keyed by timestamp for the combined book curve
+    const perTsRet = new Map<number, { sum: number; n: number }>();
+
+    for (const stage of stages) {
+      const rows = await ctx.db.query("candidates").withIndex("by_stage", (q) => q.eq("stage", stage)).collect();
+      for (const c of rows) {
+        const acct = await ctx.db.query("paperAccounts").withIndex("by_candidate", (q) => q.eq("candidateId", c._id)).first();
+        if (!acct) continue;
+        const snaps = (await ctx.db.query("equitySnapshots").withIndex("by_candidate_ts", (q) => q.eq("candidateId", c._id)).order("asc").take(2000));
+        const rets = snaps.map((s) => s.ret).filter((r) => Number.isFinite(r));
+        const eqs = snaps.map((s) => s.equity);
+        const mean = rets.length ? rets.reduce((a, b) => a + b, 0) / rets.length : 0;
+        const sd = rets.length ? Math.sqrt(Math.max(0, rets.reduce((a, b) => a + b * b, 0) / rets.length - mean * mean)) : 0;
+        const sharpe = rets.length > 48 && sd > 1e-12 ? (mean / sd) * Math.sqrt(PPY) : null;
+        let peak = 10000, maxDD = 0;
+        for (const e of eqs) { peak = Math.max(peak, e); maxDD = Math.min(maxDD, peak > 0 ? e / peak - 1 : 0); }
+        const m = parseMetrics(c.metrics);
+        const startedAt = c.incubationStartedAt ?? acct.startedAt ?? Date.now();
+        sleeves.push({
+          id: c._id, name: c.name, source: c.source, family: fam(c.source), forwardSeed: m.forwardPaper === 1 || m.forwardPaperSeed === 1,
+          startEq: 10000, equity: acct.equity, peak: acct.peakEquity ?? peak,
+          days: (Date.now() - startedAt) / 86400_000, ret: (acct.equity / (10000)) - 1,
+          sharpe, maxDD, halted: !!acct.halted, bars: rets.length,
+          spark: eqs.slice(-60),
+        });
+        // accumulate equal-weight book returns by timestamp
+        for (const s of snaps) {
+          const slot = perTsRet.get(s.ts) ?? { sum: 0, n: 0 };
+          slot.sum += s.ret; slot.n += 1; perTsRet.set(s.ts, slot);
+        }
+      }
+    }
+
+    // combined equal-weight book equity curve
+    const tsSorted = [...perTsRet.keys()].sort((a, b) => a - b);
+    const bookT: number[] = [], bookEq: number[] = []; const bookRets: number[] = [];
+    let eq = 1;
+    for (const ts of tsSorted) {
+      const slot = perTsRet.get(ts)!;
+      const r = slot.n ? slot.sum / slot.n : 0; // equal-weight average sleeve return this step
+      eq *= 1 + r; bookT.push(ts); bookEq.push(eq); bookRets.push(r);
+    }
+    const bMean = bookRets.length ? bookRets.reduce((a, b) => a + b, 0) / bookRets.length : 0;
+    const bSd = bookRets.length ? Math.sqrt(Math.max(0, bookRets.reduce((a, b) => a + b * b, 0) / bookRets.length - bMean * bMean)) : 0;
+    const bookSharpe = bookRets.length > 48 && bSd > 1e-12 ? (bMean / bSd) * Math.sqrt(PPY) : null;
+    let bookPeak = 1, bookDD = 0;
+    for (const e of bookEq) { bookPeak = Math.max(bookPeak, e); bookDD = Math.min(bookDD, e / bookPeak - 1); }
+    const days = sleeves.length ? Math.max(...sleeves.map((s) => s.days)) : 0;
+
+    sleeves.sort((a, b) => (b.sharpe ?? -99) - (a.sharpe ?? -99));
+    return {
+      nSleeves: sleeves.length,
+      days,
+      book: { t: bookT, eq: bookEq, sharpe: bookSharpe, ret: bookEq.length ? bookEq[bookEq.length - 1] - 1 : 0, maxDD: bookDD, bars: bookRets.length },
+      sleeves,
+    };
+  },
+});

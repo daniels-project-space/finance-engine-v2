@@ -2,7 +2,8 @@
 
 // Precision-instrument widgets built on the design system (ds.tsx).
 
-import { fmt, pct } from "./ds";
+import Link from "next/link";
+import { fmt, pct, ago, Chart, Spark, type Curve } from "./ds";
 
 // ---------------------------------------------------------------- Funnel
 // The headline pipeline visual: each ordered stage as a horizontal bar showing
@@ -296,5 +297,72 @@ export function Progression({ points, target = 1.04, height = 280 }: { points: P
       {record.map((r, i) => <circle key={i} cx={X(r.t).toFixed(1)} cy={Y(r.c).toFixed(1)} r="3.4" fill="#f5b932" />)}
       <text x={Math.min(X(record[record.length - 1].t) + 8, width - 40)} y={Y(record[record.length - 1].c) - 7} fontSize="13" fill="#f5b932" fontFamily="var(--font-mono)" fontWeight="bold">{record[record.length - 1].c.toFixed(2)}</text>
     </svg>
+  );
+}
+
+// ================================================================ PaperBook
+// The live forward track record (the moving headline). Big forward equity / Sharpe
+// / days, the combined book equity curve, and per-sleeve forward rows. HONEST:
+// "warming" until enough forward bars exist; framed as modest sleeves being tested.
+export interface PaperSleeve { id: string; name: string; family: string; forwardSeed: boolean; equity: number; ret: number; sharpe: number | null; days: number; maxDD: number; halted: boolean; bars: number; spark: number[] }
+export interface PaperData { nSleeves: number; days: number; book: { t: number[]; eq: number[]; sharpe: number | null; ret: number; maxDD: number; bars: number }; sleeves: PaperSleeve[] }
+
+export function PaperBook({ data }: { data: PaperData }) {
+  if (data.nSleeves === 0) {
+    return <div className="py-6"><div className="num text-[15px] text-mid">No sleeves in paper yet.</div><div className="num text-[11px] text-dim mt-1">Honest sleeves route here automatically once they pass the significance battery.</div></div>;
+  }
+  const bookRet = data.book.ret;
+  const curve: Curve | undefined = data.book.t.length > 1 ? { t: data.book.t, eq: data.book.eq } : undefined;
+  const warming = (data.book.bars ?? 0) <= 48;
+  return (
+    <div className="grid lg:grid-cols-[1fr_1.1fr] gap-7">
+      {/* left: the big forward numbers */}
+      <div>
+        <div className="flex items-end gap-4 mb-1">
+          <div className={`num leading-none ${bookRet >= 0 ? "text-up" : "text-down"}`} style={{ fontSize: 52 }}>{bookRet >= 0 ? "+" : ""}{(bookRet * 100).toFixed(2)}%</div>
+          <div className="num text-dim text-sm mb-2">forward P&amp;L</div>
+        </div>
+        <div className="flex flex-wrap gap-x-9 gap-y-3 mt-4">
+          <div><div className="hud mb-1.5">Forward Sharpe</div><div className={`num text-[20px] ${warming ? "text-dim" : (data.book.sharpe ?? 0) > 0 ? "text-up" : "text-down"}`}>{warming ? "warming" : fmt(data.book.sharpe)}</div></div>
+          <div><div className="hud mb-1.5">Days in paper</div><div className="num text-[20px] text-fg">{data.days.toFixed(1)}</div></div>
+          <div><div className="hud mb-1.5">Sleeves</div><div className="num text-[20px] text-accent">{data.nSleeves}</div></div>
+          <div><div className="hud mb-1.5">Forward maxDD</div><div className="num text-[20px] text-dim">{pct(data.book.maxDD, 1)}</div></div>
+        </div>
+        <p className="num text-[10px] text-dim mt-5 leading-relaxed max-w-md">
+          Simulated forward-test on unseen live data — these are modest, honest sleeves (passed bootstrap-CI&gt;0, deflated&gt;0, perm/PBO), not proven alpha. Some may decay forward; that&apos;s the test working. The record builds over days.
+        </p>
+      </div>
+      {/* right: the combined book equity curve */}
+      <div className="min-w-0">
+        <div className="hud mb-2">Combined paper-book equity (equal-weight, forward)</div>
+        {curve ? <Chart height={180} yLabel="growth of $1" series={[{ name: "paper book", color: bookRet >= 0 ? "#3ddb9e" : "#fb6f5d", curve }]} /> : (
+          <div className="well flex items-center justify-center" style={{ height: 180 }}><span className="hud">{data.book.bars === 0 ? "positions set — P&L accrues from next bar" : "accumulating forward bars…"}</span></div>
+        )}
+      </div>
+
+      {/* per-sleeve forward rows (full width) */}
+      <div className="lg:col-span-2">
+        <div className="hud mb-2 mt-1">Per-sleeve forward performance</div>
+        <div className="tablewrap">
+          <table className="dt">
+            <thead><tr><th>sleeve</th><th>family</th><th>fwd P&amp;L</th><th>fwd Sharpe</th><th>fwd maxDD</th><th>days</th><th>equity</th><th>status</th></tr></thead>
+            <tbody>
+              {data.sleeves.map((s) => (
+                <tr key={s.id}>
+                  <td style={{ textAlign: "left" }}><Link href={`/candidates/${s.id}`} className="text-mid hover:text-up">{s.name}</Link></td>
+                  <td style={{ textAlign: "left" }} className="num text-[10px] text-dim">{s.family}</td>
+                  <td className={`dt-num ${s.ret >= 0 ? "text-up" : "text-down"}`}>{s.ret >= 0 ? "+" : ""}{(s.ret * 100).toFixed(2)}%</td>
+                  <td className={`dt-num ${s.sharpe === null ? "text-dim" : s.sharpe > 0 ? "text-up" : "text-down"}`}>{s.sharpe === null ? "warming" : fmt(s.sharpe)}</td>
+                  <td className="dt-num text-dim">{pct(s.maxDD, 1)}</td>
+                  <td className="dt-num text-dim">{s.days.toFixed(1)}</td>
+                  <td className="dt-num text-fg">${s.equity.toFixed(0)}</td>
+                  <td className="dt-num">{s.halted ? <span className="text-down">halted</span> : <span className="text-up">live</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   );
 }

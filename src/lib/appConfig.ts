@@ -86,6 +86,18 @@ export interface AppConfig {
      *  config override as a READY RECEIVER (promotes nothing until a book clears C).
      *  The A/B/C knobs below tune the gate. */
     marginalGate: boolean;
+    /** FORWARD-PAPER PROMOTION. When true, a candidate that passes (A) the real
+     *  per-sleeve significance battery (bootstrap-CI-lo>0 + deflated(p5)>=floor +
+     *  permP<0.05 + PBO<0.5) AND (B) is marginally book-accretive / under the
+     *  correlation cap is routed to PAPER incubation EVEN IF the whole-book
+     *  deflated-1.0 bar (C) is not yet cleared. PAPER = simulated, no real money;
+     *  it builds a live forward track record. The REAL-MONEY graduation
+     *  (paper -> eligible -> champion) stays strict (forward-proof + approval).
+     *  (A) and (B) stay REAL — noise/overfit is still rejected. Default FALSE;
+     *  shipped ON via the live config override. */
+    forwardPaper: boolean;
+    /** forward-paper: max sleeves to keep in paper at once (diversified cap) */
+    forwardPaperMaxSleeves: number;
     /** (A) relaxed per-sleeve: bootstrap CI lower bound must exceed this */
     sleeveMinBootLo: number;
     /** (A) relaxed per-sleeve: deflated Sharpe (bootstrap p5) must be >= this */
@@ -190,6 +202,11 @@ export const DEFAULT_CONFIG: AppConfig = {
     // deflated(p5)>=1.0, meanAbsCorr<=0.5. These PROMOTE NOTHING until a genuinely
     // diversified book clears level-C.
     marginalGate: false,
+    // FORWARD-PAPER: default off in code; shipped ON via the live config override
+    // so the engine forward-tests honest sleeves on PAPER without the deflated-1.0
+    // wall, building a live track record while the real-money bar stays strict.
+    forwardPaper: false,
+    forwardPaperMaxSleeves: 8,
     sleeveMinBootLo: 0,
     sleeveMinDeflated: 0,
     bookMinSharpe: 1.0,
