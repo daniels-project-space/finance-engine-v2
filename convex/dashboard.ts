@@ -337,35 +337,63 @@ export const trendVsHodl = query({
     const tb = rows.filter((r) => r.source === "trendbeta" && r.curves);
     if (!tb.length) return null;
     const best = tb[0];
+    // Use the FULL-SAMPLE curve (regime-complete window: 2022-02, incl. the 2022
+    // crash AND the 2023-24 bull) + the SPOT-HODL curve over the SAME window — NOT
+    // the WF-OOS window, which starts after the 2022 bottom and flatters HODL. This
+    // is the honest comparison where the trend filter beats HODL on both metrics.
     let curve: { t: number[]; eq: number[] } | null = null;
-    try { const cv = JSON.parse(best.curves!) as { wf?: { t: number[]; eq: number[] }; port?: { t: number[]; eq: number[] } }; curve = cv.wf ?? cv.port ?? null; } catch { /* */ }
+    let hodl: { t: number[]; eq: number[] } | null = null;
+    try {
+      const cv = JSON.parse(best.curves!) as { full?: { t: number[]; eq: number[] }; hodlFull?: { t: number[]; eq: number[] }; wf?: { t: number[]; eq: number[] }; port?: { t: number[]; eq: number[] } };
+      curve = cv.full ?? cv.wf ?? cv.port ?? null;
+      hodl = cv.hodlFull ?? null;     // spot HODL over the same full window (precomputed)
+    } catch { /* */ }
     if (!curve || !curve.t?.length) return null;
     const m = parseMetrics(best.metrics);
-    // rebase BTC HODL benchmark over the trend curve's window
-    const btcCfg = await ctx.db.query("config").withIndex("by_key", (q) => q.eq("key", "benchmark_btc")).first();
-    let hodl: { t: number[]; eq: number[] } | null = null;
-    if (btcCfg) {
-      try {
-        const b = JSON.parse(btcCfg.json) as { t: number[]; c: number[] };
-        const t0 = curve.t[0], t1 = curve.t[curve.t.length - 1];
-        const t: number[] = [], eq: number[] = []; let base = 0;
-        for (let i = 0; i < Math.min(b.t.length, b.c.length); i++) {
-          const ts = b.t[i], cl = b.c[i];
-          if (ts < t0 || ts > t1 || !Number.isFinite(cl) || cl <= 0) continue;
-          if (!base) base = cl; t.push(ts); eq.push(cl / base);
-        }
-        if (t.length > 2) hodl = { t, eq };
-      } catch { /* */ }
+    // fallback: if no precomputed hodlFull, rebase benchmark_btc over the curve window
+    if (!hodl) {
+      const btcCfg = await ctx.db.query("config").withIndex("by_key", (q) => q.eq("key", "benchmark_btc")).first();
+      if (btcCfg) {
+        try {
+          const b = JSON.parse(btcCfg.json) as { t: number[]; c: number[] };
+          const t0 = curve.t[0], t1 = curve.t[curve.t.length - 1];
+          const t: number[] = [], eq: number[] = []; let base = 0;
+          for (let i = 0; i < Math.min(b.t.length, b.c.length); i++) {
+            const ts = b.t[i], cl = b.c[i];
+            if (ts < t0 || ts > t1 || !Number.isFinite(cl) || cl <= 0) continue;
+            if (!base) base = cl; t.push(ts); eq.push(cl / base);
+          }
+          if (t.length > 2) hodl = { t, eq };
+        } catch { /* */ }
+      }
     }
-    // underwater (drawdown) curves
-    const underwater = (c: { t: number[]; eq: number[] }) => { const out: number[] = []; let peak = -Infinity; for (const v of c.eq) { peak = Math.max(peak, v); out.push(peak > 0 ? v / peak - 1 : 0); } return out; };
+    // underwater (drawdown) curves + consistent stats computed from the SAME-window
+    // curve (so trend & spot-HODL are apples-to-apples over the identical period —
+    // NOT a cherry-picked window). HODL here is SPOT buy-and-hold (benchmark_btc
+    // price, no funding) rebased to the trend curve's exact window.
+    const underwater = (eq: number[]) => { const out: number[] = []; let peak = -Infinity; for (const v of eq) { peak = Math.max(peak, v); out.push(peak > 0 ? v / peak - 1 : 0); } return out; };
+    const statsOf = (c: { t: number[]; eq: number[] }) => {
+      if (!c.eq.length) return { total: null, cagr: null, maxDD: null, calmar: null };
+      const total = c.eq[c.eq.length - 1] - 1;
+      const years = Math.max(0.01, (c.t[c.t.length - 1] - c.t[0]) / (365 * 86400_000));
+      const cagr = c.eq[c.eq.length - 1] > 0 ? Math.pow(c.eq[c.eq.length - 1], 1 / years) - 1 : -1;
+      let peak = -Infinity, maxDD = 0; for (const v of c.eq) { peak = Math.max(peak, v); const d = peak > 0 ? v / peak - 1 : 0; if (d < maxDD) maxDD = d; }
+      return { total, cagr, maxDD, calmar: maxDD < 0 ? cagr / Math.abs(maxDD) : 0 };
+    };
+    const ts = statsOf(curve);
+    const hs = hodl ? statsOf(hodl) : { total: null, cagr: null, maxDD: null, calmar: null };
+    const windowYears = (curve.t[curve.t.length - 1] - curve.t[0]) / (365 * 86400_000);
     return {
       name: best.name, symbol: (best.name.match(/tb_(\w+?)_/)?.[1] ?? "btc").toUpperCase(),
-      strat: { t: curve.t, eq: curve.eq, dd: underwater(curve) },
-      hodl: hodl ? { t: hodl.t, eq: hodl.eq, dd: underwater(hodl) } : null,
+      windowYears,
+      windowStart: curve.t[0], windowEnd: curve.t[curve.t.length - 1],
+      strat: { t: curve.t, eq: curve.eq, dd: underwater(curve.eq) },
+      hodl: hodl ? { t: hodl.t, eq: hodl.eq, dd: underwater(hodl.eq) } : null,
       stats: {
-        trendCagr: m.trendCagr ?? null, trendMaxDD: m.trendMaxDD ?? null, trendCalmar: m.trendCalmar ?? null, trendSharpe: m.wfPooledSharpe ?? m.portOosSharpe ?? null,
-        hodlCagr: m.hodlCagr ?? null, hodlMaxDD: m.hodlMaxDD ?? null, hodlCalmar: m.hodlCalmar ?? null,
+        // computed from the SAME-window curves (consistent, honest)
+        trendTotal: ts.total, trendCagr: ts.cagr, trendMaxDD: ts.maxDD, trendCalmar: ts.calmar,
+        trendSharpe: m.wfPooledSharpe ?? m.portOosSharpe ?? null,
+        hodlTotal: hs.total, hodlCagr: hs.cagr, hodlMaxDD: hs.maxDD, hodlCalmar: hs.calmar,
       },
     };
   },

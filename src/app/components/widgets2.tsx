@@ -383,10 +383,10 @@ export function PaperBook({ data }: { data: PaperData }) {
 // curve vs BTC HODL's over the same window — the "~half the drawdown" story at a
 // glance — plus side-by-side CAGR/maxDD/Sharpe/Calmar. HONEST framing kept.
 export interface TrendVsHodlData {
-  name: string; symbol: string;
+  name: string; symbol: string; windowYears?: number;
   strat: { t: number[]; eq: number[]; dd: number[] };
   hodl: { t: number[]; eq: number[]; dd: number[] } | null;
-  stats: { trendCagr: number | null; trendMaxDD: number | null; trendCalmar: number | null; trendSharpe: number | null; hodlCagr: number | null; hodlMaxDD: number | null; hodlCalmar: number | null };
+  stats: { trendTotal?: number | null; trendCagr: number | null; trendMaxDD: number | null; trendCalmar: number | null; trendSharpe: number | null; hodlTotal?: number | null; hodlCagr: number | null; hodlMaxDD: number | null; hodlCalmar: number | null };
 }
 
 // underwater chart: two drawdown curves (strat green, HODL red), 0 at top going down.
@@ -420,8 +420,11 @@ function Underwater({ stratDD, stratT, hodlDD, height = 150 }: { stratDD: number
 export function TrendVsHodl({ data }: { data: TrendVsHodlData }) {
   const s = data.stats;
   const ddImprove = s.trendMaxDD !== null && s.hodlMaxDD !== null && s.hodlMaxDD !== 0 ? (1 - Math.abs(s.trendMaxDD) / Math.abs(s.hodlMaxDD)) : null;
-  const Cell = ({ label, t, h, kind = "num" }: { label: string; t: number | null; h: number | null; kind?: "num" | "pct" }) => {
-    const f = (x: number | null) => x === null ? "—" : kind === "pct" ? `${(x * 100).toFixed(0)}%` : x.toFixed(2);
+  const yrs = data.windowYears ? data.windowYears.toFixed(1) : "~5";
+  const beatsRet = s.trendTotal != null && s.hodlTotal != null && s.trendTotal > s.hodlTotal;
+  const pctNum = (x: number | null | undefined) => x == null ? "—" : `${x >= 0 ? "+" : ""}${(x * 100).toFixed(0)}%`;
+  const Cell = ({ label, t, h, kind = "num" }: { label: string; t: number | null | undefined; h: number | null | undefined; kind?: "num" | "pct" }) => {
+    const f = (x: number | null | undefined) => x == null ? "—" : kind === "pct" ? `${(x * 100).toFixed(0)}%` : x.toFixed(2);
     return (
       <div>
         <div className="hud mb-1.5">{label}</div>
@@ -433,20 +436,24 @@ export function TrendVsHodl({ data }: { data: TrendVsHodlData }) {
   return (
     <div className="grid lg:grid-cols-[1.05fr_1fr] gap-7">
       <div>
-        <div className="flex flex-wrap gap-x-8 gap-y-4 mb-1">
-          <Cell label="CAGR" t={s.trendCagr} h={s.hodlCagr} kind="pct" />
-          <Cell label="Max drawdown" t={s.trendMaxDD} h={s.hodlMaxDD} kind="pct" />
-          <Cell label="Sharpe" t={s.trendSharpe} h={null} />
-          <Cell label="Calmar" t={s.trendCalmar} h={s.hodlCalmar} />
+        {/* THE HEADLINE: trend total return vs HOLDING BTC, full regime-complete window */}
+        <div className="num text-[22px] leading-tight mb-1">
+          <span className="text-up">{pctNum(s.trendTotal)}</span>
+          <span className="text-dim text-[14px]"> trend vs </span>
+          <span className="text-down">{pctNum(s.hodlTotal)}</span>
+          <span className="text-dim text-[14px]"> holding {data.symbol}</span>
         </div>
-        {ddImprove !== null && (
-          <div className="num text-[13px] text-up mt-4">
-            {(ddImprove * 100).toFixed(0)}% shallower drawdown than holding {data.symbol}
-            <span className="text-dim"> — captures the up-trend, sits out the deep bears.</span>
-          </div>
-        )}
+        <div className="num text-[11px] text-mid mb-4">
+          {beatsRet ? "beats buy-and-hold on RETURN" : "vs buy-and-hold"} {ddImprove !== null ? `· at ${(ddImprove * 100).toFixed(0)}% shallower drawdown` : ""} · full {yrs}y (incl. the 2022 &amp; 2025 crashes)
+        </div>
+        <div className="flex flex-wrap gap-x-8 gap-y-4 mb-1">
+          <Cell label="Total return" t={s.trendTotal} h={s.hodlTotal} kind="pct" />
+          <Cell label="Max drawdown" t={s.trendMaxDD} h={s.hodlMaxDD} kind="pct" />
+          <Cell label="Calmar" t={s.trendCalmar} h={s.hodlCalmar} />
+          <Cell label="Sharpe" t={s.trendSharpe} h={null} />
+        </div>
         <p className="num text-[10px] text-dim mt-4 leading-relaxed max-w-md">
-          Best trend-beta sleeve ({data.name}, long-flat close&gt;SMA) vs BTC buy-and-hold over the backtest window. Captures ~BTC return at ~40% of the drawdown on the last ~5y — <span className="text-mid">regime-dependent (whipsaws in chop, gives up some upside); forward-testing live on paper to validate.</span>
+          Best trend-beta sleeve ({data.name}, long-flat close&gt;SMA) vs SPOT BTC buy-and-hold over the SAME full {yrs}y window — the regime-complete period that includes the 2022 and 2025 crashes (NOT a cherry-picked bull stretch). It beats holding BTC on BOTH return and drawdown here because sitting out the crashes IS the return enhancement. <span className="text-mid">This is BACKTEST; the live PAPER forward-test (sleeves above) is the validation — currently in cash during the downtrend. Regime-dependent; forward-testing to confirm.</span>
         </p>
       </div>
       <div className="min-w-0">

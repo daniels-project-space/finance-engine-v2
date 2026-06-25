@@ -64,6 +64,10 @@ export default function TournamentPage() {
   const stratMult = headline?.eq?.length ? headline.eq[headline.eq.length - 1] : undefined;
   const spxMult = spx?.eq?.length ? spx.eq[spx.eq.length - 1] : undefined;
   const btcMult = btc?.eq?.length ? btc.eq[btc.eq.length - 1] : undefined;
+  // explicit window label so a high BTC-HODL multiple is not read as BTC always wins
+  const fmtD = (ts: number) => ts ? new Date(ts).toISOString().slice(0, 7) : "?";
+  const windowYrs = t0 && t1 ? ((t1 - t0) / (365 * 86400_000)).toFixed(1) : "?";
+  const windowLabel = t0 && t1 ? `${fmtD(t0)} - ${fmtD(t1)} (${windowYrs}y)` : "";
 
   return (
     <div className="space-y-5 stagger pb-10">
@@ -88,6 +92,7 @@ export default function TournamentPage() {
               <span className="num text-[11px] text-mid">{sel.family}</span>
               {sel.tf && <span className="num text-[11px] text-dim">{sel.tf}</span>}
               <span className="num text-[11px] text-dim">OOS Sharpe <span className="text-up">{fmt(sel.oos)}</span></span>
+              {windowLabel && <span className="num text-[11px] text-accent">window {windowLabel}</span>}
               {sel.failedStage && <span className="num text-[11px] text-down">died at {sel.failedStage}</span>}
             </div>
             <Chart height={300} yLabel="growth of $10k" series={[
@@ -107,7 +112,7 @@ export default function TournamentPage() {
               </div>
             )}
             <p className="num text-[10px] text-dim mt-2">
-              Out-of-sample equity over the validated window, rebased to $10k alongside both benchmarks on the same window.{sel.failedStage ? ` This candidate died at ${sel.failedStage} — a strong backtest that did not clear the full gauntlet, shown honestly.` : ""}
+              All three lines rebased to $10k over the SAME window ({windowLabel}). The benchmark multiple depends on the window — one starting near a market bottom flatters BTC HODL, so read beats/trails only relative to THIS period, not as BTC always wins. For the regime-complete trend-vs-HODL story (incl. the 2022/2025 crashes) see the Overview.{sel.failedStage ? ` This candidate died at ${sel.failedStage} — a strong backtest that did not clear the full gauntlet, shown honestly.` : ""}
             </p>
           </>
         ) : <div className="well flex items-center justify-center" style={{ height: 300 }}><span className="hud">no scored candidates yet</span></div>}
