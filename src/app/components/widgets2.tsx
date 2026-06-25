@@ -181,3 +181,120 @@ export function ActivityFeed({ items }: { items: ActivityItem[] }) {
     </div>
   );
 }
+
+// ================================================================ BookProgress
+// The BIG headline gauge — deflated Sharpe vs the 1.0 promotion bar. Spacious,
+// the "are we there yet" number front and centre.
+export function BookProgress({ deflated, target, raw, divRatio, meanCorr, members, passes }: {
+  deflated: number; target: number; raw: number; divRatio: number; meanCorr: number; members: number; passes: boolean;
+}) {
+  const p = Math.max(0, Math.min(1, deflated / target));
+  return (
+    <div>
+      <div className="flex items-end gap-4 mb-4">
+        <div className={`num leading-none ${passes ? "text-up" : "text-accent"}`} style={{ fontSize: 64 }}>{fmt(deflated)}</div>
+        <div className="num text-dim text-2xl leading-none mb-1">/ {fmt(target)}</div>
+        <div className="ml-auto text-right">
+          <div className="num text-[11px] text-dim">{members === 0 ? "no sleeves admitted" : `${members} sleeves`}</div>
+          <div className="num text-[11px] text-dim">{(p * 100).toFixed(0)}% of the bar</div>
+        </div>
+      </div>
+      <div className="relative h-3 rounded-full bg-[#ffffff0a] overflow-hidden">
+        <div className="h-full rounded-full transition-[width] duration-700"
+          style={{ width: `${p * 100}%`, background: passes ? "linear-gradient(90deg,#1f7a5f,#3ddb9e)" : "linear-gradient(90deg,#7a5a12,#f5b932)" }} />
+        <div className="absolute top-0 bottom-0 w-0.5 bg-up/80" style={{ left: "100%" }} />
+      </div>
+      <div className="flex flex-wrap gap-x-10 gap-y-1 mt-4 num text-[11px]">
+        <span className="text-dim">raw Sharpe <span className="text-fg">{fmt(raw)}</span></span>
+        <span className="text-dim">div ratio <span className="text-info">{fmt(divRatio)}</span></span>
+        <span className="text-dim">mean |corr| <span className={meanCorr <= 0.5 ? "text-up" : "text-down"}>{fmt(meanCorr)}</span></span>
+        <span className="text-dim">{passes ? "✓ promotable" : "needs deflated ≥ 1.00 — gate is honest, nothing has cleared it"}</span>
+      </div>
+    </div>
+  );
+}
+
+// ================================================================ SimpleFunnel
+// A clean, big, spacious funnel: ordered stages with a survivor-width bar + the
+// reached count, large. Less line-noise than the dense Funnel.
+const SF_SURV = new Set(["incubating", "book", "eligible", "champion"]);
+export function SimpleFunnel({ rows, survivors }: { rows: FlowRow[]; survivors: number }) {
+  const shown = rows.filter((r) => !["book"].includes(r.key)); // collapse book row into survivors line
+  const max = Math.max(1, shown[0]?.reached ?? 1);
+  return (
+    <div className="space-y-2.5">
+      {shown.map((r) => {
+        const surv = Math.max(0, r.reached - r.killed);
+        const w = (r.reached / max) * 100;
+        const isSurv = SF_SURV.has(r.key);
+        return (
+          <div key={r.key} className="flex items-center gap-4">
+            <span className="num text-[12px] w-[150px] shrink-0 text-mid truncate">{r.label}</span>
+            <div className="flex-1 h-2 rounded-full bg-[#ffffff08] overflow-hidden">
+              <div className="h-full rounded-full" style={{ width: `${w}%`, background: isSurv ? "linear-gradient(90deg,#7a5a12,#f5b932)" : "linear-gradient(90deg,#1f6b54,#3ddb9e99)" }} />
+            </div>
+            {r.killed > 0 && <span className="num text-[10px] text-down/80 w-12 text-right">−{r.killed}</span>}
+            {r.killed === 0 && <span className="w-12" />}
+            <span className={`num text-[15px] w-14 text-right ${isSurv ? (surv > 0 ? "text-accent" : "text-dim") : surv > 0 ? "text-fg" : "text-dim"}`}>{surv > 0 ? surv : "·"}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ================================================================ Progression
+// RESTORED: the "are we improving over iterations" chart. Record best composite
+// steps up over time (amber line + node), every scored candidate a dot colored
+// by its source lane. NaN-guarded.
+export interface ProgPoint { t: number; c: number; source: string; name: string }
+export function Progression({ points, target = 1.04, height = 280 }: { points: ProgPoint[]; target?: number; height?: number }) {
+  const pts = points.filter((p) => Number.isFinite(p.t) && Number.isFinite(p.c));
+  if (pts.length < 2) return <div className="well flex items-center justify-center" style={{ height }}><span className="hud">not enough scored candidates yet</span></div>;
+  const width = 1000, padL = 40, padR = 16, padT = 18, padB = 28;
+  const t0 = pts[0].t, t1 = pts[pts.length - 1].t || t0 + 1;
+  const record: { t: number; c: number; name: string }[] = [];
+  let best = -Infinity;
+  for (const p of pts) if (p.c > best) { best = p.c; record.push({ t: p.t, c: p.c, name: p.name }); }
+  const yLo = Math.min(0, ...pts.map((p) => p.c));
+  const yHi = (Math.max(target, best) || 1) * 1.1;
+  const X = (t: number) => padL + ((t - t0) / Math.max(1, t1 - t0)) * (width - padL - padR);
+  const Y = (c: number) => padT + (1 - (c - yLo) / (yHi - yLo)) * (height - padT - padB);
+  let d = `M ${X(record[0].t).toFixed(1)} ${Y(record[0].c).toFixed(1)}`;
+  for (let i = 1; i < record.length; i++) d += ` L ${X(record[i].t).toFixed(1)} ${Y(record[i - 1].c).toFixed(1)} L ${X(record[i].t).toFixed(1)} ${Y(record[i].c).toFixed(1)}`;
+  d += ` L ${X(t1).toFixed(1)} ${Y(record[record.length - 1].c).toFixed(1)}`;
+  const area = `${d} L ${X(t1).toFixed(1)} ${Y(yLo).toFixed(1)} L ${X(record[0].t).toFixed(1)} ${Y(yLo).toFixed(1)} Z`;
+  const sameDay = t1 - t0 < 86_400_000 * 1.5;
+  const fmtTick = (t: number) => sameDay ? `${String(new Date(t).getUTCHours()).padStart(2, "0")}:${String(new Date(t).getUTCMinutes()).padStart(2, "0")}` : new Date(t).toISOString().slice(5, 10);
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} className="w-full block" style={{ maxHeight: height }}>
+      <defs>
+        <linearGradient id="progArea" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#f5b932" stopOpacity="0.18" />
+          <stop offset="100%" stopColor="#f5b932" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      {[0.25, 0.5, 0.75, 1].map((f) => {
+        const v = yLo + (yHi - yLo) * f;
+        return <g key={f}><line x1={padL} x2={width - padR} y1={Y(v)} y2={Y(v)} stroke="#ffffff0a" strokeWidth="1" /><text x={padL - 6} y={Y(v) + 3} textAnchor="end" fontSize="9" fill="#586573" fontFamily="var(--font-mono)">{v.toFixed(2)}</text></g>;
+      })}
+      {Y(target) > padT && (
+        <g>
+          <line x1={padL} x2={width - padR} y1={Y(target)} y2={Y(target)} stroke="#fb6f5d" strokeWidth="1" strokeDasharray="5 4" />
+          <text x={width - padR} y={Y(target) - 4} textAnchor="end" fontSize="9" fill="#fb6f5d" fontFamily="var(--font-mono)">target {target.toFixed(2)}</text>
+        </g>
+      )}
+      {[t0, (t0 + t1) / 2, t1].map((t, i) => (
+        <text key={i} x={X(t)} y={height - 8} textAnchor={i === 0 ? "start" : i === 2 ? "end" : "middle"} fontSize="9" fill="#586573" fontFamily="var(--font-mono)">{fmtTick(t)}</text>
+      ))}
+      {pts.map((p, i) => (
+        <circle key={i} cx={X(p.t).toFixed(1)} cy={Y(p.c).toFixed(1)} r="2.3" fill={srcColor(p.source)} opacity="0.5" />
+      ))}
+      <path d={area} fill="url(#progArea)" />
+      <path d={d} fill="none" stroke="#f5b932" strokeWidth="2.2" strokeLinejoin="round" />
+      {record.map((r, i) => <circle key={i} cx={X(r.t).toFixed(1)} cy={Y(r.c).toFixed(1)} r="3.4" fill="#f5b932" />)}
+      <text x={Math.min(X(record[record.length - 1].t) + 8, width - 40)} y={Y(record[record.length - 1].c) - 7} fontSize="13" fill="#f5b932" fontFamily="var(--font-mono)" fontWeight="bold">{record[record.length - 1].c.toFixed(2)}</text>
+    </svg>
+  );
+}

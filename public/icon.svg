@@ -1,0 +1,13 @@
+<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="32" height="32" rx="7" fill="#0b0e13"/>
+  <!-- THE DISTILLATION FUNNEL: a converging V-form (the gauntlet narrowing the
+       noisy field) distilling through stepped strata to ONE amber survivor node. -->
+  <!-- funnel walls: two converging lines from a wide mouth to a narrow neck -->
+  <path d="M6 8 L16 19 L26 8" stroke="#e2e8f0" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round" opacity="0.5"/>
+  <!-- distillation strata across the converging throat (narrowing as they go down) -->
+  <line x1="10.5" y1="11.5" x2="21.5" y2="11.5" stroke="#e2e8f0" stroke-width="2.1" stroke-linecap="round" opacity="0.85"/>
+  <line x1="13"   y1="15"   x2="19"   y2="15"   stroke="#e2e8f0" stroke-width="2.1" stroke-linecap="round"/>
+  <!-- neck + the single distilled survivor (amber) -->
+  <line x1="16" y1="19" x2="16" y2="22.5" stroke="#f4b740" stroke-width="2.1" stroke-linecap="round"/>
+  <circle cx="16" cy="25" r="2.6" fill="#f4b740"/>
+</svg>

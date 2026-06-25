@@ -10,6 +10,29 @@ function parseMetrics(s?: string): Record<string, number> {
   if (!s) return {};
   try { return JSON.parse(s) as Record<string, number>; } catch { return {}; }
 }
+
+/**
+ * Iteration progression: every SCORED candidate as {t, composite, source},
+ * time-ordered, for the "are we improving over iterations" chart (record line +
+ * per-candidate dots colored by source). Reads only candidates that have a
+ * composite via the by_composite index — far smaller than the full table, so no
+ * 16MB read warning. Trims `dsl`/`metrics`/`curves` off the payload.
+ */
+export const progression = query({
+  args: {},
+  handler: async (ctx) => {
+    const scored = await ctx.db.query("candidates").withIndex("by_composite").collect();
+    const pts = scored
+      .filter((r) => r.composite !== undefined && Number.isFinite(r.composite))
+      .map((r) => ({ t: r.createdAt, c: r.composite as number, source: r.source, name: r.name }))
+      .sort((a, b) => a.t - b.t);
+    // cap to the most recent 800 to keep the payload light
+    const trimmed = pts.slice(-800);
+    let best = -Infinity;
+    for (const p of trimmed) if (p.c > best) best = p.c;
+    return { points: trimmed, best: best > -Infinity ? best : 0, n: trimmed.length };
+  },
+});
 const oosOf = (m: Record<string, number>) => m.portOosSharpe ?? m.wfPooledSharpe ?? m.oosSharpe;
 
 // alive = anything that survived the gauntlet into the book / paper / crown.
