@@ -9,8 +9,80 @@ import { mergeConfig } from "../lib/appConfig";
 import { loadBars } from "../lib/data";
 import { computeSignals, toArrays } from "../engine/compile";
 import { DEFAULT_FEE_BPS, PPY, SLIP_BPS, type Bars, type StrategyDoc } from "../engine/types";
+import { isIvSleeve, buildIvDaily, type IvSleeveDoc } from "../engine/ivsleeve";
+import { isOcSleeve } from "../engine/onchainsleeve";
+import { isXSection } from "../engine/xsection";
+import { loadDvol, dvolMap, dvolCurrencyFor } from "../lib/deribit";
 import { sendTelegram } from "../lib/telegram";
 import type { Id } from "../../convex/_generated/dataModel";
+
+// result shape every kind-specific forward step returns, fed to the SAME paper
+// P&L / kill-switch / applyStep accounting as the DSL path.
+interface ForwardStep {
+  stepTs: number;
+  portRet: number;
+  newPositions: { symbol: string; weight: number; entryPrice?: number }[];
+  trades: { symbol: string; ts: number; weightFrom: number; weightTo: number; price: number; fillPrice: number; costUsd: number; note?: string }[];
+}
+
+// IV-vol sleeve forward step: long-flat ONE coin (BTC/ETH) from the point-in-time
+// DVOL / IV-RV z-score regime. Mirrors backtestIv's decision rule (zPast reads
+// ONLY days strictly before i, so the weight at the latest closed day uses no
+// future info — no look-ahead). Feeds the same paper P&L tracking.
+async function ivForwardStep(
+  doc: IvSleeveDoc, params: Record<string, number>, equity: number,
+  prevWeight: number, prevPrice: number, lastStepTs: number | undefined,
+): Promise<ForwardStep | null> {
+  const cur = dvolCurrencyFor(doc.symbol);
+  if (!cur) return null;
+  const [bars, dvolSeries] = await Promise.all([loadBars(doc.symbol, "1d"), loadDvol(cur)]);
+  if (!bars || !dvolSeries) return null;
+  const S = buildIvDaily(bars, dvolMap(dvolSeries), doc.rvWin);
+  const n = S.t.length;
+  if (n < 2) return null;
+  const zWin = Math.max(20, Math.round(params.zWin ?? doc.zWin));
+  const thresh = params.thresh ?? doc.thresh;
+  const SLIP_D: Record<string, number> = { "BTC/USDT": 1.5, "ETH/USDT": 2 };
+  const slip = (SLIP_D[doc.symbol] ?? 2) / 1e4;
+  // trailing z over days STRICTLY before i (point-in-time, matches engine zPast)
+  const zPast = (arr: number[], i: number, win: number): number => {
+    const lo = Math.max(0, i - win); let s = 0, sq = 0, k = 0;
+    for (let j = lo; j < i; j++) { s += arr[j]; sq += arr[j] * arr[j]; k++; }
+    if (k < 20) return 0;
+    const m = s / k, sd = Math.sqrt(Math.max(1e-12, sq / k - m * m));
+    return (arr[i] - m) / sd;
+  };
+  const ivrv = S.dvol.map((d, i) => d - S.rv[i]);
+  const i = n - 1;                                  // the latest CLOSED day
+  // mark-to-market: prev weight earned the move into day i (close_{i-1} -> close_i)
+  const closeI = bars.c[bars.c.length - 1];
+  let portRet = 0;
+  if (prevWeight !== 0 && prevPrice > 0) portRet += prevWeight * (closeI / prevPrice - 1);
+  // funding while long since last step (point-in-time)
+  if (bars.fundingT && bars.fundingR && lastStepTs) {
+    for (let fi = bars.fundingT.length - 1; fi >= 0; fi--) {
+      const ft = bars.fundingT[fi];
+      if (ft <= lastStepTs) break;
+      if (ft <= Date.now()) portRet -= prevWeight * bars.fundingR[fi];
+    }
+  }
+  // decide target weight at day i from info <= i (zPast strictly < i)
+  let want = 0;
+  if (doc.signal === "dvol_high") want = zPast(S.dvol, i, zWin) > thresh ? 1 : 0;
+  else if (doc.signal === "dvol_low") want = zPast(S.dvol, i, zWin) < -thresh ? 1 : 0;
+  else if (doc.signal === "ivrv_high") want = zPast(ivrv, i, zWin) > thresh ? 1 : 0;
+  else want = zPast(ivrv, i, zWin) < -thresh ? 1 : 0;
+  const wTo = want * Math.min(doc.risk.maxLeverage, 1);
+  const trades: ForwardStep["trades"] = [];
+  if (Math.abs(wTo - prevWeight) > 0.02) {
+    const side = Math.sign(wTo - prevWeight);
+    const tradeCost = Math.abs(wTo - prevWeight) * (DEFAULT_FEE_BPS / 1e4 + slip);
+    portRet -= tradeCost;
+    trades.push({ symbol: doc.symbol, ts: S.t[i], weightFrom: prevWeight, weightTo: wTo, price: closeI, fillPrice: closeI * (1 + side * slip), costUsd: tradeCost * equity, note: `iv:${doc.signal}` });
+  }
+  const newPositions = [{ symbol: doc.symbol, weight: Math.abs(wTo - prevWeight) > 0.02 ? wTo : prevWeight, entryPrice: closeI }];
+  return { stepTs: S.t[i], portRet, newPositions, trades };
+}
 
 const EWMA_LAMBDA = 0.94;
 
@@ -78,8 +150,7 @@ export const paperStep = schedules.task({
         const candidateId = cand._id as Id<"candidates">;
         const acct = await cx.query(api.paper.getAccount, { candidateId });
         if (!acct || acct.halted) continue;
-        const doc = JSON.parse(cand.dsl) as StrategyDoc;
-        const candTf = doc.tf ?? cfg.tf;
+        const rawDoc = JSON.parse(cand.dsl) as unknown;
         const params = cand.bestParams ? JSON.parse(cand.bestParams) as Record<string, number> : {};
         const positions = await cx.query(api.paper.positionsFor, { candidateId });
         const posBySym = new Map(positions.map((p) => [p.symbol, p]));
@@ -87,9 +158,29 @@ export const paperStep = schedules.task({
         let stepTs = 0;
         let portRet = 0;
         let costUsd = 0;
-        const newPositions: { symbol: string; weight: number; entryPrice?: number }[] = [];
-        const trades: { symbol: string; ts: number; weightFrom: number; weightTo: number; price: number; fillPrice: number; costUsd: number; note?: string }[] = [];
+        let newPositions: { symbol: string; weight: number; entryPrice?: number }[] = [];
+        let trades: { symbol: string; ts: number; weightFrom: number; weightTo: number; price: number; fillPrice: number; costUsd: number; note?: string }[] = [];
 
+        // ---- KIND-AWARE DISPATCH ----------------------------------------------
+        // ivsleeve trades ONE coin from the point-in-time DVOL signal; onchain /
+        // xsection have their own engines (framework ready, not yet seeded). DSL
+        // sleeves use the per-symbol compiled-expr path below.
+        if (isIvSleeve(rawDoc)) {
+          const cur = posBySym.get(rawDoc.symbol);
+          const step = await ivForwardStep(rawDoc, params, acct.equity, cur?.weight ?? 0, cur?.entryPrice ?? 0, acct.lastStepTs);
+          if (!step) { logger.log(`iv sleeve "${cand.name}": DVOL/bars unavailable, skipped`); continue; }
+          stepTs = step.stepTs; portRet = step.portRet; newPositions = step.newPositions; trades = step.trades;
+          for (const t of trades) costUsd += t.costUsd;
+        } else if (isOcSleeve(rawDoc) || isXSection(rawDoc)) {
+          // FRAMEWORK READY: route to backtestOc/backtestXSection's forward signal
+          // when these kinds are seeded. Not seeded today (failed the bootstrap
+          // battery), so we skip rather than mis-trade them as DSL.
+          logger.log(`paper-step: kind "${(rawDoc as { kind?: string }).kind}" forward-testing not yet enabled ("${cand.name}") — skipped`);
+          continue;
+        } else {
+        // ---- DSL PATH (unchanged) ---------------------------------------------
+        const doc = rawDoc as StrategyDoc;
+        const candTf = doc.tf ?? cfg.tf;
         for (const sym of cfg.universe) {
           const bars = await getBars(sym, candTf);
           if (!bars) continue;
@@ -125,6 +216,7 @@ export const paperStep = schedules.task({
           }
           newPositions.push({ symbol: sym, weight: Math.abs(wTo - prevWeight) > 0.02 ? wTo : prevWeight, entryPrice: t.lastClose });
         }
+        } // end DSL path
 
         if (stepTs === 0) continue;
         const newEquity = acct.equity * (1 + portRet);

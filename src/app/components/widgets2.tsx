@@ -328,7 +328,18 @@ export function PaperBook({ data }: { data: PaperData }) {
           <div><div className="hud mb-1.5">Sleeves</div><div className="num text-[20px] text-accent">{data.nSleeves}</div></div>
           <div><div className="hud mb-1.5">Forward maxDD</div><div className="num text-[20px] text-dim">{pct(data.book.maxDD, 1)}</div></div>
         </div>
-        <p className="num text-[10px] text-dim mt-5 leading-relaxed max-w-md">
+        {(() => {
+          const fams = [...new Set(data.sleeves.map((s) => s.family))];
+          const diversified = fams.length >= 2;
+          return (
+            <div className="num text-[10px] mt-4 flex flex-wrap items-center gap-2">
+              <span className="hud">families</span>
+              {fams.map((f) => <span key={f} className="pill pill-soft">{f}</span>)}
+              {diversified && <span className="text-up">· diversified (orthogonal IV-vol + DSL, not just correlated breakouts)</span>}
+            </div>
+          );
+        })()}
+        <p className="num text-[10px] text-dim mt-4 leading-relaxed max-w-md">
           Simulated forward-test on unseen live data — these are modest, honest sleeves (passed bootstrap-CI&gt;0, deflated&gt;0, perm/PBO), not proven alpha. Some may decay forward; that&apos;s the test working. The record builds over days.
         </p>
       </div>
