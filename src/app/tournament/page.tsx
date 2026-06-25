@@ -3,139 +3,100 @@
 import { useQuery } from "convex/react";
 import Link from "next/link";
 import { api } from "../../../convex/_generated/api";
-import { GauntletTrail, LineChart, MiniCurve, type Curve } from "../components/charts";
-import { SOURCE_COLORS } from "../components/widgets";
-import { StageBadge, fmtNum, fmtPct } from "../components/ui";
+import { Panel, Stat, StageBadge, Spark, fmt, pct, type Curve } from "../components/ds";
+import { srcColor } from "../components/widgets2";
 
 interface Parsed {
   id: string; name: string; stage: string; source: string; composite: number;
-  failedStage?: string; tf: string; lev: string;
-  m: Record<string, number>;
-  wfCurve?: Curve;
+  failedStage?: string; tf: string; m: Record<string, number>; wf?: Curve;
 }
-
 function parseRow(c: { _id: string; name: string; stage: string; source: string; composite?: number; failedStage?: string; metrics?: string; curves?: string; dsl?: string }): Parsed {
-  let m: Record<string, number> = {};
-  let wfCurve: Curve | undefined;
-  let tf = "1h", lev = "";
-  try { m = c.metrics ? JSON.parse(c.metrics) : {}; } catch {}
-  try { wfCurve = c.curves ? (JSON.parse(c.curves) as { wf?: Curve }).wf : undefined; } catch {}
-  try {
-    const d = c.dsl ? JSON.parse(c.dsl) as { tf?: string; risk?: { volTargetAnnual?: number; maxLeverage?: number } } : {};
-    tf = d.tf ?? "1h";
-    if (d.risk?.volTargetAnnual) lev = `σ${(d.risk.volTargetAnnual * 100).toFixed(0)}·L${d.risk.maxLeverage ?? 2}`;
-  } catch {}
-  return { id: c._id, name: c.name, stage: c.stage, source: c.source, composite: c.composite ?? 0, failedStage: c.failedStage, tf, lev, m, wfCurve };
+  let m: Record<string, number> = {}, wf: Curve | undefined, tf = "";
+  try { m = c.metrics ? JSON.parse(c.metrics) : {}; } catch { /* */ }
+  try { const cv = c.curves ? JSON.parse(c.curves) as { wf?: Curve; port?: Curve } : {}; wf = cv.port ?? cv.wf; } catch { /* */ }
+  try { tf = c.dsl ? (JSON.parse(c.dsl).tf ?? "") : ""; } catch { /* */ }
+  return { id: c._id, name: c.name, stage: c.stage, source: c.source, composite: c.composite ?? 0, failedStage: c.failedStage, tf, m, wf };
 }
 
-const ACTIVE_STAGES = new Set(["champion", "eligible", "incubating", "sealed_passed"]);
+const ALIVE = new Set(["champion", "eligible", "incubating", "sealed_passed"]);
 
-function Row({ r, rank }: { r: Parsed; rank: number }) {
+// compact gauntlet trail: which stage each candidate reached / died at.
+const TRAIL = ["S2", "S3", "S4", "S5", "S5b", "S5c", "S6"];
+function Trail({ failedStage, stage }: { failedStage?: string; stage: string }) {
+  const alive = ALIVE.has(stage);
+  let dead = -1;
+  if (failedStage) {
+    const norm = failedStage.replace(/^S(\d+\w*)-.*/, "S$1").replace(/[a-z]?(walkforward|stats|portfolio|cross|train|stress|sealed|pbo)/, "");
+    const base = failedStage.startsWith("S5b") ? "S5b" : failedStage.startsWith("S5c") ? "S5c" : failedStage.split("-")[0].replace(/[a-z]+$/, "");
+    dead = TRAIL.indexOf(base);
+  }
   return (
-    <tr className="border-t border-edge/60 hover:bg-edge/30">
-      <td className="num text-dim py-2 pr-2">{rank}</td>
-      <td className="pr-3">
-        <Link href={`/candidates/${r.id}`} className="hover:text-up">{r.name}</Link>
-        <div className="num text-[10px] text-dim">{r.source} · {r.tf}{r.lev ? ` · ${r.lev}` : ""}{r.failedStage ? ` · out at ${r.failedStage}` : ""}</div>
-      </td>
-      <td><GauntletTrail failedStage={r.failedStage} stage={r.stage} /></td>
-      <td className="px-2"><MiniCurve curve={r.wfCurve} /></td>
-      <td className="num text-right text-gold">{fmtNum(r.composite)}</td>
-      <td className="num text-right text-up">{fmtNum(r.m.portOosSharpe)}</td>
-      <td className="num text-right">{fmtNum(r.m.wfPooledSharpe)}</td>
-      <td className="num text-right">{fmtNum(r.m.sealedSharpe)}</td>
-      <td className={`num text-right ${(r.m.fullMaxDD ?? 0) < -0.25 ? "text-down" : "text-dim"}`}>{fmtPct(r.m.fullMaxDD, 0)}</td>
-      <td className="num text-right text-dim">{fmtPct(r.m.winRate, 0)}</td>
-    </tr>
+    <div className="flex items-center gap-[3px]">
+      {TRAIL.map((s, i) => {
+        const state = alive ? "pass" : dead === -1 ? "pending" : i < dead ? "pass" : i === dead ? "dead" : "unreached";
+        const bg = state === "pass" ? "#1c6b54" : state === "dead" ? "#f4604f" : state === "pending" ? "#3a4651" : "#1e2730";
+        return <div key={s} className="w-4 h-[5px] rounded-sm" style={{ background: bg, boxShadow: state === "dead" ? "0 0 5px #f4604faa" : undefined }} title={`${s} ${state}`} />;
+      })}
+    </div>
+  );
+}
+
+function Table({ rows }: { rows: Parsed[] }) {
+  return (
+    <div className="tablewrap">
+      <table className="dt">
+        <thead><tr>
+          <th>#</th><th>strategy</th><th>trail</th><th>wf equity</th>
+          <th>score</th><th>port shrp</th><th>wf shrp</th><th>sealed</th><th>max dd</th><th>win%</th>
+        </tr></thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={r.id}>
+              <td style={{ textAlign: "left" }} className="dt-num text-dim">{i + 1}</td>
+              <td style={{ textAlign: "left" }}>
+                <Link href={`/candidates/${r.id}`} className="text-mid hover:text-up">{r.name}</Link>
+                <div className="num text-[9px] text-dim">
+                  <span style={{ color: srcColor(r.source) }}>{r.source}</span>{r.tf ? ` · ${r.tf}` : ""}{r.failedStage ? ` · ✗ ${r.failedStage}` : ` · ${r.stage}`}
+                </div>
+              </td>
+              <td><div className="flex justify-end"><Trail failedStage={r.failedStage} stage={r.stage} /></div></td>
+              <td><div className="flex justify-end">{r.wf ? <Spark values={r.wf.eq} width={84} height={22} /> : <span className="hud">—</span>}</div></td>
+              <td className="dt-num text-accent">{fmt(r.composite)}</td>
+              <td className="dt-num text-up">{fmt(r.m.portOosSharpe)}</td>
+              <td className="dt-num text-fg">{fmt(r.m.wfPooledSharpe)}</td>
+              <td className="dt-num text-dim">{fmt(r.m.sealedSharpe)}</td>
+              <td className={`dt-num ${(r.m.fullMaxDD ?? 0) < -0.25 ? "text-down" : "text-dim"}`}>{pct(r.m.fullMaxDD, 0)}</td>
+              <td className="dt-num text-dim">{pct(r.m.winRate, 0)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
 export default function TournamentPage() {
   const rows = useQuery(api.candidates.tournament, { limit: 80 });
-  const funnel = useQuery(api.candidates.funnel, {});
   const parsed = rows?.map(parseRow) ?? [];
-  const league = parsed.filter((r) => ACTIVE_STAGES.has(r.stage));
-  const qualifiers = parsed.filter((r) => !ACTIVE_STAGES.has(r.stage));
+  const league = parsed.filter((r) => ALIVE.has(r.stage));
+  const fallen = parsed.filter((r) => !ALIVE.has(r.stage));
 
   return (
-    <div className="space-y-6">
-      <section className="panel p-5">
-        <div className="flex items-baseline justify-between flex-wrap gap-2">
-          <div>
-            <h1 className="text-xl font-semibold">Tournament</h1>
-            <p className="text-dim text-sm mt-1">
-              Every strategy fights the same gauntlet. Composite = 0.5·walk-forward OOS Sharpe + 0.3·sealed Sharpe + 0.2·full Sharpe.
-              Champion seat requires surviving 30 days of live paper inside its own confidence bands, then beating the incumbent by 10%.
-            </p>
-          </div>
-          <div className="num text-xs text-dim">
-            {funnel ? `${(funnel.failed ?? 0) + (funnel.graveyard ?? 0)} killed · ${funnel.incubating ?? 0} incubating · ${funnel.eligible ?? 0} eligible · ${funnel.champion ?? 0} champion` : "…"}
-          </div>
-        </div>
-      </section>
+    <div className="space-y-4 stagger">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Panel pad="p-3.5"><Stat label="Scored" value={parsed.length} /></Panel>
+        <Panel pad="p-3.5"><Stat label="Alive (league)" value={league.length} tone={league.length > 0 ? "up" : "dim"} /></Panel>
+        <Panel pad="p-3.5"><Stat label="Best composite" value={fmt(parsed[0]?.composite)} tone="accent" /></Panel>
+        <Panel pad="p-3.5"><Stat label="Best OOS Sharpe" value={fmt(Math.max(0, ...parsed.map((p) => p.m.portOosSharpe ?? p.m.wfPooledSharpe ?? 0)))} tone="up" /></Panel>
+      </div>
 
-      {/* ============ podium ============ */}
-      {parsed.length >= 3 && (
-        <section className="grid md:grid-cols-3 gap-4">
-          {[parsed[1], parsed[0], parsed[2]].map((r, slot) => {
-            const rank = slot === 1 ? 1 : slot === 0 ? 2 : 3;
-            const medal = rank === 1 ? "#e8b34b" : rank === 2 ? "#9fb0bd" : "#b0793f";
-            return (
-              <Link key={r.id} href={`/candidates/${r.id}`}
-                className={`panel p-4 relative overflow-hidden hover:border-dim transition-colors ${rank === 1 ? "md:-translate-y-2" : ""}`}>
-                <div className="absolute inset-0 pointer-events-none" style={{ background: `radial-gradient(420px 140px at 50% -30%, ${medal}1f, transparent)` }} />
-                <div className="relative">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="num text-2xl font-bold" style={{ color: medal }}>#{rank}</span>
-                    <span className="num text-[10px] px-1.5 py-0.5 rounded border border-edge" style={{ color: SOURCE_COLORS[r.source] }}>{r.source} · {r.tf}</span>
-                  </div>
-                  <div className="font-semibold truncate">{r.name}</div>
-                  <div className="num text-[10px] text-dim mb-2">{r.failedStage ? `out at ${r.failedStage}` : r.stage}</div>
-                  {r.wfCurve ? <LineChart series={[{ name: "WF OOS", color: medal, curve: r.wfCurve }]} height={110} yLabel="" /> : <div className="hud py-8 text-center">no curve</div>}
-                  <div className="flex justify-between mt-2 num text-xs">
-                    <span className="text-gold">comp {fmtNum(r.composite)}</span>
-                    <span className="text-dim">wf {fmtNum(r.m.wfPooledSharpe)}</span>
-                    <span className="text-dim">dd {fmtPct(r.m.fullMaxDD, 0)}</span>
-                    <span className="text-dim">win {fmtPct(r.m.winRate, 0)}</span>
-                  </div>
-                </div>
-              </Link>
-            );
-          })}
-        </section>
-      )}
+      <Panel title="League — alive (gauntlet + sealed holdout passed)">
+        {league.length ? <Table rows={league} /> : <div className="hud py-5 text-center">nobody alive yet — the seat is earned, not seeded</div>}
+      </Panel>
 
-      <section className="panel p-5">
-        <div className="hud mb-3">League — alive (gauntlet + sealed holdout passed)</div>
-        {league.length ? (
-          <div className="tablewrap"><table className="w-full text-sm">
-            <thead><tr className="hud text-left">
-              <th className="pb-2">#</th><th>strategy</th><th>gauntlet trail</th><th className="px-2">WF OOS equity</th>
-              <th className="text-right">score</th><th className="text-right">PORT shrp</th><th className="text-right">BTC shrp</th><th className="text-right">sealed</th>
-              <th className="text-right">worst drop</th><th className="text-right">win%</th>
-            </tr></thead>
-            <tbody>{league.map((r, i) => <Row key={r.id} r={r} rank={i + 1} />)}</tbody>
-          </table></div>
-        ) : (
-          <div className="text-dim text-sm py-3">
-            Nobody alive yet. The league seat is earned, not seeded — candidates below show how close the field is getting.
-          </div>
-        )}
-      </section>
-
-      <section className="panel p-5">
-        <div className="hud mb-3">Qualifiers — best of the fallen (ranked by partial composite at time of death)</div>
-        {qualifiers.length ? (
-          <div className="tablewrap"><table className="w-full text-sm">
-            <thead><tr className="hud text-left">
-              <th className="pb-2">#</th><th>strategy</th><th>gauntlet trail</th><th className="px-2">WF OOS equity</th>
-              <th className="text-right">score</th><th className="text-right">PORT shrp</th><th className="text-right">BTC shrp</th><th className="text-right">sealed</th>
-              <th className="text-right">worst drop</th><th className="text-right">win%</th>
-            </tr></thead>
-            <tbody>{qualifiers.slice(0, 40).map((r, i) => <Row key={r.id} r={r} rank={i + 1} />)}</tbody>
-          </table></div>
-        ) : <div className="text-dim text-sm py-3">No scored candidates yet — run a cycle.</div>}
-      </section>
+      <Panel title="Qualifiers — best of the field (ranked by composite at death)" right={<span className="num text-[10px] text-dim">composite = 0.5·wf + 0.3·sealed + 0.2·full</span>}>
+        {fallen.length ? <Table rows={fallen.slice(0, 50)} /> : <div className="hud py-5 text-center">no scored candidates yet</div>}
+      </Panel>
     </div>
   );
 }

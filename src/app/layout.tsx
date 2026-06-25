@@ -9,40 +9,30 @@ const grotesk = Space_Grotesk({ subsets: ["latin"], variable: "--font-sans" });
 const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono" });
 
 export const metadata: Metadata = {
-  title: "Finance Engine v2",
-  description: "Self-improving crypto strategy lab",
+  title: "finance-engine v2",
+  description: "Self-improving crypto strategy lab — precision research terminal",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <body className={`${grotesk.variable} ${mono.variable} min-h-screen antialiased`}>
-        <span
-          aria-hidden
-          style={{
-            position: "fixed",
-            top: 6,
-            left: 6,
-            width: 14,
-            height: 14,
-            borderRadius: "50%",
-            backgroundColor: "#FFD400",
-            zIndex: 9999,
-          }}
-        />
         <Providers>
-          <header className="border-b border-edge bg-panel/70 backdrop-blur sticky top-0 z-20">
-            <div className="mx-auto max-w-7xl px-5 h-14 flex items-center gap-6">
+          <header className="border-b border-edge bg-ink/85 backdrop-blur sticky top-0 z-20">
+            <div className="mx-auto max-w-[1280px] px-5 h-13 flex items-center gap-5" style={{ height: 52 }}>
               <Link href="/" className="flex items-baseline gap-2 shrink-0">
-                <span className="num text-up font-bold drop-shadow-[0_0_6px_#2dd4a766]">FE</span>
-                <span className="font-semibold tracking-tight">finance-engine</span>
-                <span className="num text-dim text-xs">v2</span>
+                <span className="num text-accent font-bold tracking-tight">fe</span>
+                <span className="font-semibold tracking-tight text-fg text-[15px]">finance-engine</span>
+                <span className="num text-dim text-[10px]">v2</span>
               </Link>
               <NavLinks />
-              <div className="ml-auto hud hidden md:block">paper · perps · BTC ETH SOL BNB XRP · 1h/4h/1d</div>
+              <div className="ml-auto hud hidden lg:flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-up live-dot" />
+                paper · perps · ccxt · 24×3tf
+              </div>
             </div>
           </header>
-          <main className="mx-auto max-w-7xl px-5 py-7 rise">{children}</main>
+          <main className="mx-auto max-w-[1280px] px-5 py-5">{children}</main>
         </Providers>
       </body>
     </html>

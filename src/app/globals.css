@@ -1,50 +1,118 @@
 @import "tailwindcss";
 
+/* ============================================================ DESIGN SYSTEM
+   PRECISION INSTRUMENT / QUANT RESEARCH TERMINAL
+   - deep ink base (not pure black), ONE surface level, ONE signal accent (amber)
+   - semantic stage colors (alive/killed/promoted) + pass/fail
+   - mono leads (numbers are heroes); refined sans for labels
+   - 4/8px spacing rhythm, tight type scale, restrained motion
+   ============================================================ */
 @theme {
-  --color-ink: #0a0e12;
-  --color-panel: #10161c;
-  --color-edge: #1d2730;
-  --color-fg: #d7e0e8;
-  --color-dim: #6b7a87;
-  --color-up: #2dd4a7;
-  --color-down: #f4604f;
-  --color-gold: #e8b34b;
-  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  /* base */
+  --color-ink:    #0b0e13;   /* app background — deep charcoal/ink */
+  --color-base:   #0e1218;   /* one step up */
+  --color-panel:  #12171f;   /* the single surface level */
+  --color-edge:   #1e2730;   /* hairline borders */
+  --color-edge2:  #2a3742;   /* hover border */
+  --color-fg:     #dbe3ec;   /* primary text */
+  --color-mid:    #92a1b0;   /* secondary */
+  --color-dim:    #5e6c7a;   /* tertiary / labels */
+  --color-faint:  #3a4651;   /* ghost */
+
+  /* ONE signal accent */
+  --color-accent: #f4b740;   /* amber — the instrument's signal color */
+
+  /* semantic */
+  --color-up:     #34d399;   /* gain / pass / alive */
+  --color-down:   #f4604f;   /* loss / fail / killed */
+  --color-info:   #5cc8ff;   /* neutral data accent (sparing) */
+  --color-promo:  #c084fc;   /* promoted / champion (rare) */
+
+  --radius: 8px;
+
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
   --font-sans: "Space Grotesk", system-ui, sans-serif;
 }
 
-html { background: var(--color-ink); color: var(--color-fg); }
-body { font-family: var(--font-sans); }
-
-.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-
-.panel {
-  background: linear-gradient(180deg, #121922 0%, var(--color-panel) 14%);
-  border: 1px solid var(--color-edge);
-  border-radius: 10px;
-  box-shadow: 0 1px 0 #ffffff06 inset, 0 8px 24px -18px #000;
-  transition: border-color 0.25s ease;
+html { background: var(--color-ink); color: var(--color-fg); color-scheme: dark; }
+body {
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01", "cv01";
+  background:
+    radial-gradient(1100px 520px at 82% -8%, #f4b7400a, transparent 60%),
+    radial-gradient(900px 480px at 8% -4%, #5cc8ff08, transparent 55%);
+  background-attachment: fixed;
 }
-.panel:hover { border-color: #2a3742; }
 
-/* scrollbars that match the terminal */
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #1d2730; border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: #2a3742; }
+/* numbers are the heroes — tabular mono everywhere */
+.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
 
-@keyframes riseIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-.rise { animation: riseIn 0.4s ease both; }
+/* ---- the single panel/surface ---- */
+.panel {
+  background: var(--color-panel);
+  border: 1px solid var(--color-edge);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 0 #ffffff05 inset, 0 10px 30px -24px #000;
+}
+.panel-h { transition: border-color .2s ease; }
+.panel-h:hover { border-color: var(--color-edge2); }
 
-.tablewrap { overflow-x: auto; }
-.tablewrap table { min-width: 920px; }
+/* inset wells (chart backgrounds, table zebra base) */
+.well { background: var(--color-base); border: 1px solid var(--color-edge); border-radius: 6px; }
 
+/* ---- label / hud micro-type ---- */
 .hud {
   font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.18em;
+  font-size: 9.5px;
+  line-height: 1.2;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--color-dim);
 }
+.label { font-family: var(--font-sans); font-size: 11px; letter-spacing: .02em; color: var(--color-mid); }
 
-::selection { background: #2dd4a733; }
+/* ---- dense data table ---- */
+table.dt { width: 100%; border-collapse: collapse; }
+table.dt thead th {
+  font-family: var(--font-mono); font-size: 9px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--color-dim); font-weight: 500; text-align: right; padding: 0 10px 8px; white-space: nowrap;
+}
+table.dt thead th:first-child, table.dt tbody td:first-child { text-align: left; }
+table.dt tbody td { padding: 6px 10px; border-top: 1px solid var(--color-edge); text-align: right; white-space: nowrap; }
+table.dt tbody tr { transition: background .12s ease; }
+table.dt tbody tr:hover { background: #ffffff05; }
+.dt-num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* ---- pills / badges ---- */
+.pill {
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 4px; border: 1px solid currentColor; line-height: 1.5;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.pill-soft { border-color: var(--color-edge); }
+
+/* ---- scrollbars ---- */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-edge); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-edge2); }
+::selection { background: #f4b74033; }
+
+/* ---- one orchestrated load: staggered rise ---- */
+@keyframes riseIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.stagger > * { animation: riseIn .42s cubic-bezier(.2,.7,.2,1) both; }
+.stagger > *:nth-child(1){animation-delay:.02s}
+.stagger > *:nth-child(2){animation-delay:.06s}
+.stagger > *:nth-child(3){animation-delay:.10s}
+.stagger > *:nth-child(4){animation-delay:.14s}
+.stagger > *:nth-child(5){animation-delay:.18s}
+.stagger > *:nth-child(6){animation-delay:.22s}
+.stagger > *:nth-child(7){animation-delay:.26s}
+.stagger > *:nth-child(8){animation-delay:.30s}
+@media (prefers-reduced-motion: reduce){ .stagger > * { animation: none; } }
+
+.tablewrap { overflow-x: auto; }
+
+/* subtle pulse for live indicators */
+@keyframes softpulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+.live-dot { animation: softpulse 1.8s ease-in-out infinite; }

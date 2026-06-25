@@ -10,6 +10,7 @@
 
 import type * as book from "../book.js";
 import type * as candidates from "../candidates.js";
+import type * as dashboard from "../dashboard.js";
 import type * as ledger from "../ledger.js";
 import type * as paper from "../paper.js";
 import type * as pipeline from "../pipeline.js";
@@ -26,6 +27,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   book: typeof book;
   candidates: typeof candidates;
+  dashboard: typeof dashboard;
   ledger: typeof ledger;
   paper: typeof paper;
   pipeline: typeof pipeline;
