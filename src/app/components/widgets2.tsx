@@ -304,7 +304,7 @@ export function Progression({ points, target = 1.04, height = 280 }: { points: P
 // The live forward track record (the moving headline). Big forward equity / Sharpe
 // / days, the combined book equity curve, and per-sleeve forward rows. HONEST:
 // "warming" until enough forward bars exist; framed as modest sleeves being tested.
-export interface PaperSleeve { id: string; name: string; family: string; forwardSeed: boolean; equity: number; ret: number; sharpe: number | null; days: number; maxDD: number; halted: boolean; bars: number; spark: number[] }
+export interface PaperSleeve { id: string; name: string; family: string; forwardSeed: boolean; leverage?: number; equity: number; ret: number; sharpe: number | null; days: number; maxDD: number; halted: boolean; bars: number; spark: number[] }
 export interface PaperData { nSleeves: number; days: number; book: { t: number[]; eq: number[]; sharpe: number | null; ret: number; maxDD: number; bars: number }; sleeves: PaperSleeve[] }
 
 export function PaperBook({ data }: { data: PaperData }) {
@@ -360,7 +360,10 @@ export function PaperBook({ data }: { data: PaperData }) {
             <tbody>
               {data.sleeves.map((s) => (
                 <tr key={s.id}>
-                  <td style={{ textAlign: "left" }}><Link href={`/candidates/${s.id}`} className="text-mid hover:text-up">{s.name}</Link></td>
+                  <td style={{ textAlign: "left" }}>
+                    <Link href={`/candidates/${s.id}`} className="text-mid hover:text-up">{s.name}</Link>
+                    {s.leverage && s.leverage > 1 ? <span className="pill text-down ml-2">{s.leverage}x aggressive</span> : null}
+                  </td>
                   <td style={{ textAlign: "left" }} className="num text-[10px] text-dim">{s.family}</td>
                   <td className={`dt-num ${s.ret >= 0 ? "text-up" : "text-down"}`}>{s.ret >= 0 ? "+" : ""}{(s.ret * 100).toFixed(2)}%</td>
                   <td className={`dt-num ${s.sharpe === null ? "text-dim" : s.sharpe > 0 ? "text-up" : "text-down"}`}>{s.sharpe === null ? "warming" : fmt(s.sharpe)}</td>
@@ -387,6 +390,7 @@ export interface TrendVsHodlData {
   strat: { t: number[]; eq: number[]; dd: number[] };
   hodl: { t: number[]; eq: number[]; dd: number[] } | null;
   stats: { trendTotal?: number | null; trendCagr: number | null; trendMaxDD: number | null; trendCalmar: number | null; trendSharpe: number | null; hodlTotal?: number | null; hodlCagr: number | null; hodlMaxDD: number | null; hodlCalmar: number | null };
+  agg?: { total: number | null; maxDD: number | null; calmar: number | null; leverage: number } | null;
 }
 
 // underwater chart: two drawdown curves (strat green, HODL red), 0 at top going down.
@@ -452,6 +456,19 @@ export function TrendVsHodl({ data }: { data: TrendVsHodlData }) {
           <Cell label="Calmar" t={s.trendCalmar} h={s.hodlCalmar} />
           <Cell label="Sharpe" t={s.trendSharpe} h={null} />
         </div>
+        {data.agg && data.agg.total != null && (
+          <div className="mt-4 rounded-lg bg-[#fb6f5d10] border border-[#fb6f5d22] px-3 py-2.5">
+            <div className="hud text-down mb-1.5">1.5x AGGRESSIVE variant — head-to-head (backtest)</div>
+            <div className="num text-[11px] flex flex-wrap gap-x-5 gap-y-1">
+              <span className="text-mid">total <span className="text-down">{pctNum(data.agg.total)}</span> <span className="text-dim">vs 1x {pctNum(s.trendTotal)} vs HODL {pctNum(s.hodlTotal)}</span></span>
+              <span className="text-mid">maxDD <span className="text-down">{(data.agg.maxDD! * 100).toFixed(0)}%</span> <span className="text-dim">vs 1x {(s.trendMaxDD! * 100).toFixed(0)}% vs HODL {(s.hodlMaxDD! * 100).toFixed(0)}%</span></span>
+              <span className="text-mid">Calmar <span className="text-down">{data.agg.calmar?.toFixed(2)}</span> <span className="text-dim">vs 1x {s.trendCalmar?.toFixed(2)}</span></span>
+            </div>
+            <p className="num text-[10px] text-dim mt-2 leading-relaxed">
+              1.5x = the AGGRESSIVE variant. Backtest adds ~50pp return for ~14pp more drawdown, but the walk-forward says the edge over 1x is THIN (same ~0.78 Sharpe / Calmar) and regime-dependent, and leverage carries real flash-crash / liquidation tail risk (liq ~-66% intrabar) that a daily backtest understates. Forward-testing live to judge whether it earns its risk.
+            </p>
+          </div>
+        )}
         <p className="num text-[10px] text-dim mt-4 leading-relaxed max-w-md">
           Best trend-beta sleeve ({data.name}, long-flat close&gt;SMA) vs SPOT BTC buy-and-hold over the SAME full {yrs}y window — the regime-complete period that includes the 2022 and 2025 crashes (NOT a cherry-picked bull stretch). It beats holding BTC on BOTH return and drawdown here because sitting out the crashes IS the return enhancement. <span className="text-mid">This is BACKTEST; the live PAPER forward-test (sleeves above) is the validation — currently in cash during the downtrend. Regime-dependent; forward-testing to confirm.</span>
         </p>

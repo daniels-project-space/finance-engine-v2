@@ -258,7 +258,7 @@ export const paperBook = query({
   args: {},
   handler: async (ctx) => {
     const stages = ["incubating", "eligible", "champion"];
-    const sleeves: { id: string; name: string; source: string; family: string; forwardSeed: boolean; startEq: number; equity: number; peak: number; days: number; ret: number; sharpe: number | null; maxDD: number; halted: boolean; bars: number; spark: number[]; vsHodl?: { trendCagr: number; trendMaxDD: number; trendCalmar: number; hodlCagr: number; hodlMaxDD: number; hodlCalmar: number } }[] = [];
+    const sleeves: { id: string; name: string; source: string; family: string; forwardSeed: boolean; leverage?: number; startEq: number; equity: number; peak: number; days: number; ret: number; sharpe: number | null; maxDD: number; halted: boolean; bars: number; spark: number[]; vsHodl?: { trendCagr: number; trendMaxDD: number; trendCalmar: number; hodlCagr: number; hodlMaxDD: number; hodlCalmar: number } }[] = [];
     const PPY = 8760; // hourly paper steps
     const fam = (s: string) => s === "xsection" ? "Cross-sectional" : s === "ivsleeve" ? "IV-timing" : s === "onchain" ? "On-chain" : s === "trendbeta" ? "Trend-beta" : "DSL";
     // collect all snapshots keyed by timestamp for the combined book curve
@@ -280,7 +280,7 @@ export const paperBook = query({
         const m = parseMetrics(c.metrics);
         const startedAt = c.incubationStartedAt ?? acct.startedAt ?? Date.now();
         sleeves.push({
-          id: c._id, name: c.name, source: c.source, family: fam(c.source), forwardSeed: m.forwardPaper === 1 || m.forwardPaperSeed === 1,
+          id: c._id, name: c.name, source: c.source, family: fam(c.source), forwardSeed: m.forwardPaper === 1 || m.forwardPaperSeed === 1, leverage: m.leverage ?? (m.aggressive ? 1.5 : undefined),
           startEq: 10000, equity: acct.equity, peak: acct.peakEquity ?? peak,
           days: (Date.now() - startedAt) / 86400_000, ret: (acct.equity / (10000)) - 1,
           sharpe, maxDD, halted: !!acct.halted, bars: rets.length,
@@ -336,7 +336,9 @@ export const trendVsHodl = query({
     const rows = await ctx.db.query("candidates").withIndex("by_composite").order("desc").take(60);
     const tb = rows.filter((r) => r.source === "trendbeta" && r.curves);
     if (!tb.length) return null;
-    const best = tb[0];
+    const isAgg = (r: typeof tb[number]) => { const mm = parseMetrics(r.metrics); return mm.aggressive === 1 || (mm.leverage ?? 1) > 1; };
+    // primary = the strongest NON-aggressive (1x) sleeve (the recommended variant)
+    const best = tb.find((r) => !isAgg(r)) ?? tb[0];
     // Use the FULL-SAMPLE curve (regime-complete window: 2022-02, incl. the 2022
     // crash AND the 2023-24 bull) + the SPOT-HODL curve over the SAME window — NOT
     // the WF-OOS window, which starts after the 2022 bottom and flatters HODL. This
@@ -382,6 +384,11 @@ export const trendVsHodl = query({
     };
     const ts = statsOf(curve);
     const hs = hodl ? statsOf(hodl) : { total: null, cagr: null, maxDD: null, calmar: null };
+    // AGGRESSIVE 1.5x variant of the SAME coin (for the 1.5x-vs-1x-vs-HODL panel)
+    const bestSym = best.name.match(/tb_(\w+?)_/)?.[1];
+    const aggRow = tb.find((r) => isAgg(r) && r.name.match(/tb_(\w+?)_/)?.[1] === bestSym);
+    let agg: { total: number | null; maxDD: number | null; calmar: number | null; leverage: number } | null = null;
+    if (aggRow) { const am = parseMetrics(aggRow.metrics); agg = { total: am.fullTotal ?? null, maxDD: am.fullMaxDD ?? null, calmar: am.fullCalmar ?? null, leverage: am.leverage ?? 1.5 }; }
     const windowYears = (curve.t[curve.t.length - 1] - curve.t[0]) / (365 * 86400_000);
     return {
       name: best.name, symbol: (best.name.match(/tb_(\w+?)_/)?.[1] ?? "btc").toUpperCase(),
@@ -395,6 +402,7 @@ export const trendVsHodl = query({
         trendSharpe: m.wfPooledSharpe ?? m.portOosSharpe ?? null,
         hodlTotal: hs.total, hodlCagr: hs.cagr, hodlMaxDD: hs.maxDD, hodlCalmar: hs.calmar,
       },
+      agg,
     };
   },
 });

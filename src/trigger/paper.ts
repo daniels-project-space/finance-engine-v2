@@ -116,6 +116,21 @@ async function trendForwardStep(
   }
   // SMA over closes (i-win, i] — only info <= i (no look-ahead)
   let sma = 0; for (let k = i - win + 1; k <= i; k++) sma += S.close[k]; sma /= win;
+  // HONEST LIQUIDATION (leveraged only): if the intrabar low on the day just closed
+  // breached the liq distance (1/lev - maint margin), the leveraged long is wiped.
+  // At 1.5x the distance is ~-66% intrabar so this ~never triggers on a daily bar —
+  // but it tracks the real flash-crash tail that a daily model understates.
+  const MAINT = 0.005;
+  if (maxLev > 1 && prevWeight > 0 && prevPrice > 0 && bars.l && bars.l.length === bars.c.length) {
+    const intrabarLow = bars.l[bars.l.length - 1] / prevPrice - 1;
+    const liqDist = -(1 / prevWeight - MAINT);
+    if (intrabarLow <= liqDist) {
+      // wiped to liquidation: lose the full margin on the position, go flat
+      portRet = liqDist; 
+      const np = [{ symbol: doc.symbol, weight: 0, entryPrice: closeI }];
+      return { stepTs: S.t[i], portRet, newPositions: np, trades: [{ symbol: doc.symbol, ts: S.t[i], weightFrom: prevWeight, weightTo: 0, price: closeI, fillPrice: closeI, costUsd: 0, note: `LIQUIDATED ${maxLev}x` }] };
+    }
+  }
   const wTo = S.close[i] > sma ? maxLev : 0;          // long if above SMA, else flat
   const trades: ForwardStep["trades"] = [];
   if (Math.abs(wTo - prevWeight) > 0.02) {
