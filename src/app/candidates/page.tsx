@@ -5,62 +5,88 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import { api } from "../../../convex/_generated/api";
-import { StageBadge, fmtNum, timeAgo } from "../components/ui";
+import { Panel, Stat, StageBadge, Spark, fmt, ago, compact, type Curve } from "../components/ds";
+import { srcColor, familyOf, GauntletTrail } from "../components/widgets2";
+
+const STAGES = ["queued", "gauntlet", "failed", "incubating", "eligible", "champion", "sealed_passed", "archived", "demoted"];
 
 function CandidatesInner() {
   const params = useSearchParams();
   const [stage, setStage] = useState(params.get("stage") ?? "");
-  const byStage = useQuery(api.candidates.listByStage, stage ? { stage, limit: 100 } : "skip");
-  const recent = useQuery(api.candidates.recent, !stage ? { limit: 100 } : "skip");
-  const leaders = useQuery(api.candidates.leaderboard, { limit: 10 });
+  const byStage = useQuery(api.candidates.listByStage, stage ? { stage, limit: 120 } : "skip");
+  const recent = useQuery(api.candidates.recent, !stage ? { limit: 120 } : "skip");
+  const board = useQuery(api.candidates.tournament, { limit: 6 });
+  const flow = useQuery(api.dashboard.stageFlow, {});
   const rows = stage ? byStage : recent;
 
   return (
-    <div className="space-y-6">
-      <section className="panel p-5">
-        <div className="hud mb-3">Leaderboard (composite = 0.5·WF + 0.3·sealed + 0.2·full)</div>
-        <div className="grid md:grid-cols-2 gap-2">
-          {leaders?.map((c, i) => (
-            <Link key={c._id} href={`/candidates/${c._id}`} className="flex items-center gap-3 text-sm hover:bg-edge/40 rounded px-2 py-1">
-              <span className="num text-dim w-5">{i + 1}</span>
-              <span className="num text-gold w-14">{fmtNum(c.composite)}</span>
-              <StageBadge stage={c.stage} />
-              <span className="truncate">{c.name}</span>
-            </Link>
-          ))}
-          {!leaders?.length && <div className="text-dim text-sm">Nothing has scored yet.</div>}
-        </div>
-      </section>
+    <div className="space-y-4 stagger">
+      {/* tiles */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Panel pad="p-4"><Stat label="Total bred" value={compact(flow?.total)} /></Panel>
+        <Panel pad="p-4"><Stat label="In gauntlet" value={compact(flow?.inGauntlet)} tone="info" /></Panel>
+        <Panel pad="p-4"><Stat label="Survivors" value={flow?.survivors ?? 0} tone={(flow?.survivors ?? 0) > 0 ? "up" : "dim"} /></Panel>
+        <Panel pad="p-4"><Stat label="Best composite" value={fmt(board?.[0]?.composite)} tone="accent" /></Panel>
+      </div>
 
-      <section className="panel p-5">
-        <div className="flex items-center gap-4 mb-4">
-          <div className="hud">Candidates</div>
-          <select value={stage} onChange={(e) => setStage(e.target.value)} className="bg-ink border border-edge rounded px-2 py-1 text-sm">
-            <option value="">recent (all)</option>
-            {["queued", "gauntlet", "failed", "incubating", "eligible", "champion", "archived", "demoted"].map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
+      {/* top by composite (works even when nobody is 'alive') */}
+      <Panel title="Top by composite" right={<Link href="/tournament" className="num text-[10px] text-dim hover:text-fg">tournament →</Link>}>
+        <div className="grid md:grid-cols-2 gap-x-6 gap-y-1">
+          {(board ?? []).map((c, i) => {
+            const m: Record<string, number> = safeParse(c.metrics) ?? {};
+            const cv: { wf?: Curve; port?: Curve } = safeParse(c.curves) ?? {};
+            return (
+              <Link key={c._id} href={`/candidates/${c._id}`} className="flex items-center gap-3 text-sm rounded-lg px-2.5 py-2 hover:bg-[#ffffff06]">
+                <span className={`num w-4 ${i === 0 ? "text-accent" : "text-dim"}`}>{i + 1}</span>
+                <span className="truncate flex-1 text-mid">{c.name}</span>
+                <Spark values={(cv.port ?? cv.wf)?.eq ?? []} width={70} height={20} />
+                <span className="num text-[9px]" style={{ color: srcColor(c.source) }}>{c.source}</span>
+                <span className="num w-12 text-right text-accent">{fmt(c.composite)}</span>
+                <span className="num w-12 text-right text-dim">{fmt(m.portOosSharpe ?? m.wfPooledSharpe)}</span>
+              </Link>
+            );
+          })}
+          {!board?.length && <div className="hud py-4 text-center">nothing scored yet</div>}
         </div>
-        <table className="w-full text-sm">
-          <thead><tr className="hud text-left"><th className="pb-2">name</th><th>stage</th><th>source</th><th>failed at</th><th className="text-right">composite</th><th className="text-right">age</th></tr></thead>
-          <tbody>
-            {rows?.map((c) => (
-              <tr key={c._id} className="border-t border-edge/60 hover:bg-edge/30">
-                <td className="py-2"><Link href={`/candidates/${c._id}`} className="hover:text-up">{c.name}</Link></td>
-                <td><StageBadge stage={c.stage} /></td>
-                <td className="text-dim num text-xs">{c.source}</td>
-                <td className="text-dim text-xs truncate max-w-[280px]">{c.failedStage ? `${c.failedStage}: ${c.failedReason}` : ""}</td>
-                <td className="num text-right">{fmtNum(c.composite)}</td>
-                <td className="num text-dim text-right text-xs">{timeAgo(c.createdAt)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {!rows?.length && <div className="text-dim text-sm py-4">Empty.</div>}
-      </section>
+      </Panel>
+
+      {/* full list */}
+      <Panel title="All candidates" right={
+        <select value={stage} onChange={(e) => setStage(e.target.value)}
+          className="num text-[11px] bg-[#ffffff08] border border-[#ffffff0f] rounded-md px-2 py-1 text-mid outline-none">
+          <option value="">recent (all)</option>
+          {STAGES.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      }>
+        <div className="tablewrap">
+          <table className="dt">
+            <thead><tr><th>name</th><th>family</th><th>trail</th><th>stage</th><th>composite</th><th>failed at</th><th>age</th></tr></thead>
+            <tbody>
+              {(rows ?? []).map((c) => (
+                <tr key={c._id}>
+                  <td style={{ textAlign: "left" }}>
+                    <Link href={`/candidates/${c._id}`} className="text-mid hover:text-up">{c.name}</Link>
+                    <span className="num text-[9px] ml-2" style={{ color: srcColor(c.source) }}>{c.source}</span>
+                  </td>
+                  <td style={{ textAlign: "left" }} className="num text-[10px] text-dim">{familyOf(c.source)}</td>
+                  <td><div className="flex justify-end"><GauntletTrail failedStage={c.failedStage} stage={c.stage} /></div></td>
+                  <td><StageBadge stage={c.stage} /></td>
+                  <td className="dt-num text-accent">{fmt(c.composite)}</td>
+                  <td style={{ textAlign: "left" }} className="text-dim text-[11px] truncate max-w-[240px]">{c.failedStage ? `${c.failedStage}` : "—"}</td>
+                  <td className="dt-num text-dim text-xs">{ago(c.createdAt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {!rows?.length && <div className="hud py-6 text-center">empty</div>}
+      </Panel>
     </div>
   );
 }
 
+function safeParse<T>(s: string | undefined | null): T | null { if (!s) return null; try { return JSON.parse(s) as T; } catch { return null; } }
+
 export default function CandidatesPage() {
-  return <Suspense fallback={<div className="hud">loading…</div>}><CandidatesInner /></Suspense>;
+  return <Suspense fallback={<div className="hud py-10 text-center">loading…</div>}><CandidatesInner /></Suspense>;
 }

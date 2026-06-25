@@ -100,11 +100,48 @@ export function BookGauge({ deflated, target, raw }: { deflated: number; target:
 
 // ---------------------------------------------------------------- Source attribution
 const SRC: Record<string, string> = {
-  seed: "#5cc8ff", imported: "#c084fc", llm: "#f4b740", gp: "#92a1b0",
-  mutation: "#34d399", crossover: "#5cc8ff", repair: "#f08a3c",
-  xsection: "#c084fc", ivsleeve: "#5cc8ff", onchain: "#34d399",
+  seed: "#5cc8ff", imported: "#c191fb", llm: "#f5b932", gp: "#8b9aab",
+  mutation: "#3ddb9e", crossover: "#5cc8ff", repair: "#f08a3c",
+  xsection: "#c191fb", ivsleeve: "#5cc8ff", onchain: "#3ddb9e",
 };
 export function srcColor(s: string): string { return SRC[s] ?? "#5e6c7a"; }
+
+// map a generator source to its sleeve family label
+export function familyOf(source: string): string {
+  if (source === "xsection") return "Cross-sectional";
+  if (source === "ivsleeve") return "IV-timing";
+  if (source === "onchain") return "On-chain";
+  return "DSL";
+}
+
+// ---------------------------------------------------------------- gauntlet trail
+// Compact segmented trail: green = passed, red = died here, ghost = never reached.
+const TRAIL = ["S2", "S3", "S4", "S5", "S5b", "S5c", "S6"];
+const ALIVE_STAGES = new Set(["champion", "eligible", "incubating", "sealed_passed"]);
+function trailDeathIdx(failedStage?: string): number {
+  if (!failedStage) return -1;
+  const base = failedStage.startsWith("S5b") ? "S5b" : failedStage.startsWith("S5c") ? "S5c"
+    : failedStage.split("-")[0].replace(/[a-z]+$/, "");
+  return TRAIL.indexOf(base);
+}
+export function GauntletTrail({ failedStage, stage, labels = false }: { failedStage?: string; stage: string; labels?: boolean }) {
+  const alive = ALIVE_STAGES.has(stage);
+  const dead = trailDeathIdx(failedStage);
+  return (
+    <div className="flex items-center gap-[3px]">
+      {TRAIL.map((s, i) => {
+        const state = alive ? "pass" : dead === -1 ? "pending" : i < dead ? "pass" : i === dead ? "dead" : "unreached";
+        const bg = state === "pass" ? "#1f7a5f" : state === "dead" ? "#fb6f5d" : state === "pending" ? "#364250" : "#1b242e";
+        return (
+          <div key={s} className="flex flex-col items-center gap-1" title={`${s} · ${state}`}>
+            <div className="h-[6px] rounded-sm" style={{ width: labels ? 26 : 18, background: bg, boxShadow: state === "dead" ? "0 0 6px #fb6f5daa" : undefined }} />
+            {labels && <span className={`num text-[8px] ${state === "dead" ? "text-down" : state === "pass" ? "text-up/70" : "text-dim"}`}>{s}</span>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export function Attribution({ stats }: { stats: Record<string, { count: number; best: number; scored: number }> }) {
   const rows = Object.entries(stats).filter(([, s]) => s.best > -9).sort((a, b) => b[1].best - a[1].best);

@@ -3,18 +3,20 @@
 import { useMutation, useQuery } from "convex/react";
 import { useEffect, useState } from "react";
 import { api } from "../../../convex/_generated/api";
+import { Panel, Stat, fmt } from "../components/ds";
 
 export default function ConfigPage() {
   const raw = useQuery(api.pipeline.getConfig, { key: "app" });
-  const datasets = useQuery(api.pipeline.listDatasets, {});
   const llmSpend = useQuery(api.pipeline.getCounter, { key: `llm_usd_cents:${new Date().toISOString().slice(0, 10)}` });
   const trials = useQuery(api.pipeline.getCounter, { key: "trials_total" });
   const setConfig = useMutation(api.pipeline.setConfig);
   const [text, setText] = useState("");
-  const [saved, setSaved] = useState(false);
+  const [saved, setSaved] = useState<"idle" | "ok" | "err">("idle");
 
   useEffect(() => {
-    if (raw !== undefined && text === "") setText(raw ? JSON.stringify(JSON.parse(raw), null, 2) : "{}");
+    if (raw !== undefined && text === "") {
+      try { setText(raw ? JSON.stringify(JSON.parse(raw), null, 2) : "{}"); } catch { setText(raw ?? "{}"); }
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [raw]);
 
@@ -22,46 +24,28 @@ export default function ConfigPage() {
     try {
       JSON.parse(text);
       await setConfig({ key: "app", json: text });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 1500);
-    } catch {
-      alert("invalid JSON");
-    }
+      setSaved("ok"); setTimeout(() => setSaved("idle"), 1600);
+    } catch { setSaved("err"); setTimeout(() => setSaved("idle"), 2000); }
   };
 
   return (
-    <div className="space-y-6">
-      <section className="panel p-5 flex gap-10">
-        <div><div className="hud mb-1">Trials (DSR deflation N)</div><div className="num text-xl">{trials ?? "·"}</div></div>
-        <div><div className="hud mb-1">LLM spend today</div><div className="num text-xl">${((llmSpend ?? 0) / 100).toFixed(2)}</div></div>
-      </section>
+    <div className="space-y-4 stagger">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+        <Panel pad="p-4"><Stat label="Trials (DSR deflation N)" value={trials ?? "·"} /></Panel>
+        <Panel pad="p-4"><Stat label="LLM spend today" value={`$${((llmSpend ?? 0) / 100).toFixed(2)}`} tone="fg" /></Panel>
+        <Panel pad="p-4"><Stat label="Config key" value="app" tone="dim" size="sm" sub="overrides defaults" /></Panel>
+      </div>
 
-      <section className="panel p-5">
-        <div className="hud mb-3">Datasets</div>
-        <table className="w-full text-sm num">
-          <thead><tr className="hud text-left"><th className="pb-1">symbol</th><th>tf</th><th className="text-right">bars</th><th className="text-right">gaps</th><th className="text-right">last bar</th></tr></thead>
-          <tbody>
-            {datasets?.map((d) => (
-              <tr key={d._id} className="border-t border-edge/60">
-                <td className="py-1">{d.symbol}</td><td className="text-dim">{d.tf}</td>
-                <td className="text-right">{d.bars.toLocaleString()}</td>
-                <td className={`text-right ${d.gaps > 5 ? "text-down" : "text-dim"}`}>{d.gaps}</td>
-                <td className="text-right text-dim text-xs">{new Date(d.lastTs).toISOString().slice(0, 16)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {!datasets?.length && <div className="text-dim text-sm py-2">No datasets — trigger backfill-history.</div>}
-      </section>
-
-      <section className="panel p-5">
-        <div className="hud mb-2">App config (overrides defaults; partial JSON fine)</div>
-        <textarea value={text} onChange={(e) => setText(e.target.value)} rows={18} spellCheck={false}
-          className="w-full bg-ink border border-edge rounded p-3 num text-xs" />
-        <button onClick={save} className="mt-3 px-4 py-1.5 rounded border border-emerald-800 text-up hover:bg-emerald-950 num text-sm">
-          {saved ? "saved ✓" : "save"}
+      <Panel title="App config" right={
+        <button onClick={save}
+          className={`num text-[11px] px-3 py-1.5 rounded-md transition-colors ${saved === "ok" ? "text-up bg-up/10" : saved === "err" ? "text-down bg-down/10" : "text-mid bg-[#ffffff08] hover:bg-[#ffffff12]"}`}>
+          {saved === "ok" ? "saved ✓" : saved === "err" ? "invalid JSON" : "save"}
         </button>
-      </section>
+      }>
+        <p className="num text-[10px] text-dim mb-3">Partial JSON merges over code defaults. Flags: xsection, ivsleeve, ocsleeve, onchain, marginalGate, historyStart, benchmark_spx, benchmark_btc.</p>
+        <textarea value={text} onChange={(e) => setText(e.target.value)} rows={20} spellCheck={false}
+          className="w-full bg-base border border-[#ffffff0a] rounded-lg p-4 num text-xs text-mid outline-none focus:border-[#ffffff18] resize-y" />
+      </Panel>
     </div>
   );
 }
