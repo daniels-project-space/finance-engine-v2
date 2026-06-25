@@ -12,13 +12,15 @@ import { crossoverStrategies, mutateStrategy, randomStrategy, recipeOf, setIcBia
 import { icFamilyWeights, icRankingText, type IcRankedRow } from "../engine/signals";
 import { SEED_LIBRARY } from "../engine/library";
 import { IMPORTED_LIBRARY } from "../engine/imports";
-import { evaluateSealed, runGauntlet, runGauntletXSection, runGauntletIv, runGauntletOc, type GauntletReport } from "../engine/gauntlet";
+import { evaluateSealed, runGauntlet, runGauntletXSection, runGauntletIv, runGauntletOc, runGauntletTrend, type GauntletReport } from "../engine/gauntlet";
 import { isXSection, alignUniverse, type XSectionDoc, type XAligned } from "../engine/xsection";
 import { generateXSection, validateXSection, xsectionHash, xsectionFamilyHash } from "../engine/xsectionGen";
 import { isIvSleeve, buildIvDaily, type IvSleeveDoc, type IvDaily } from "../engine/ivsleeve";
 import { generateIvSleeve, validateIvSleeve, ivSleeveHash, ivSleeveFamilyHash } from "../engine/ivsleeveGen";
 import { isOcSleeve, buildOcDaily, type OcSleeveDoc, type OcDaily } from "../engine/onchainsleeve";
 import { generateOcSleeve, validateOcSleeve, ocSleeveHash, ocSleeveFamilyHash } from "../engine/onchainsleeveGen";
+import { isTrendBeta, buildTrendDaily, type TrendBetaDoc, type TrendDaily } from "../engine/trendbeta";
+import { generateTrendBeta, validateTrendBeta, trendBetaHash, trendBetaFamilyHash } from "../engine/trendbetaGen";
 import { loadDvol, dvolMap, dvolCurrencyFor } from "../lib/deribit";
 import { realityCheck } from "../engine/rigor";
 import { buildBook, marginalContribution, bookQualifies, type Stream } from "../engine/book";
@@ -145,7 +147,7 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
   };
 
   const seedBase = (await cx.mutation(api.pipeline.bumpCounter, { key: "seed", by: 1 })) * 7919;
-  type Proposal = { doc: StrategyDoc | XSectionDoc | IvSleeveDoc | OcSleeveDoc; source: string; parentIds?: string[]; mechanism?: string; parentComposite?: number; expectedComposite?: number; wild?: boolean };
+  type Proposal = { doc: StrategyDoc | XSectionDoc | IvSleeveDoc | OcSleeveDoc | TrendBetaDoc; source: string; parentIds?: string[]; mechanism?: string; parentComposite?: number; expectedComposite?: number; wild?: boolean };
   const proposals: Proposal[] = [];
 
   // Library backfill: any research-backed seed or imported published strategy
@@ -254,6 +256,19 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
     }
   }
 
+  // TREND-BETA lane: risk-managed long beta (long-flat close>SMA) on BTC/ETH/SOL.
+  // The "safer than HODL" family — captures the up-trend, sits out deep bears.
+  // Routes to the adapted trend gauntlet + the book/forward-paper gate. Gated by
+  // cfg.trendbeta.enabled.
+  if (cfg.trendbeta?.enabled) {
+    const tbN = Math.max(1, Math.round((cfg.trendbeta.perCycle ?? 3) * scale));
+    for (let i = 0; i < tbN; i++) {
+      const tbdoc = generateTrendBeta(seedBase + 500_000 + i);
+      proposals.push({ doc: tbdoc, source: "trendbeta", mechanism: "trend_beta", expectedComposite: globalMean, wild: false });
+      summary.fresh++;
+    }
+  }
+
   // LLM lane. Anthropic goes through the subscription Claude CLI (NO API key),
   // which now runs in BOTH the VPS and the Trigger cloud image (the claude bin
   // is baked in and authed from the injected CLAUDE_CODE_OAUTH_TOKEN). On any CLI
@@ -304,6 +319,9 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
     } else if (isOcSleeve(p.doc)) {
       if (validateOcSleeve(p.doc).length > 0) continue;
       hash = ocSleeveHash(p.doc); fam = ocSleeveFamilyHash(p.doc); premium = "onchain";
+    } else if (isTrendBeta(p.doc)) {
+      if (validateTrendBeta(p.doc).length > 0) continue;
+      hash = trendBetaHash(p.doc); fam = trendBetaFamilyHash(p.doc); premium = "trendbeta";
     } else {
       const sdoc = p.doc as StrategyDoc;
       if (validateStrategy(sdoc).length > 0) continue;
@@ -353,7 +371,7 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   const cand = await cx.query(api.candidates.get, { id: candidateId });
   if (!cand) throw new Error("candidate not found");
   const cfg = await getAppConfig(cx);
-  const rawDoc = JSON.parse(cand.dsl) as StrategyDoc | XSectionDoc | IvSleeveDoc | OcSleeveDoc;
+  const rawDoc = JSON.parse(cand.dsl) as StrategyDoc | XSectionDoc | IvSleeveDoc | OcSleeveDoc | TrendBetaDoc;
   const sealTs = Date.parse(cfg.sealDate);
 
   // CROSS-SECTIONAL routing: an xsection sleeve takes the adapted gauntlet path
@@ -368,6 +386,10 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   // ON-CHAIN routing: a single-coin on-chain valuation-timing sleeve -> Oc gauntlet.
   if (isOcSleeve(rawDoc)) {
     return processOcCandidate(cx, candidateId, cand, rawDoc, cfg, sealTs, log);
+  }
+  // TREND-BETA routing: a single-coin risk-managed-beta sleeve -> trend gauntlet.
+  if (isTrendBeta(rawDoc)) {
+    return processTrendCandidate(cx, candidateId, cand, rawDoc, cfg, sealTs, log);
   }
   const doc = rawDoc as StrategyDoc;
 
@@ -1058,5 +1080,75 @@ async function processOcCandidate(
   });
   await cx.mutation(api.pipeline.addLesson, { source: cand.source, candidateId, text: `ONCHAIN PASSED: "${cand.name}" on-chain valuation-timing sleeve (OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)}, dsr ${(report.metrics.dsr ?? 0).toFixed(2)}) -> 30-day paper incubation.` });
   log(`ONCHAIN PASSED -> incubating (OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)})`);
+  return { passed: true, composite: report.metrics.composite };
+}
+
+// ====================================================================
+// TREND-BETA candidate processing (risk-managed long-beta sleeve). Single-coin
+// daily stream -> adapted trend gauntlet (S4 cross-symbol skipped). Same floors +
+// same validated DSR/bootstrap math. Promotion routes through the book/forward-
+// paper gate, like the other orthogonal sleeves.
+// ====================================================================
+async function processTrendCandidate(
+  cx: ConvexHttpClient,
+  candidateId: Id<"candidates">,
+  cand: { name: string; hypothesis: string; source: string; hash: string; familyHash: string },
+  doc: TrendBetaDoc,
+  cfg: AppConfig,
+  sealTs: number,
+  log: Log,
+): Promise<ProcessResult> {
+  await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "gauntlet" });
+  const ppy = 365;
+  const bars = await loadBars(doc.symbol, "1d");
+  if (!bars) {
+    await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: "S0-static", failedReason: "missing perp bars" });
+    return { passed: false, stage: "S0-static" };
+  }
+  const daily: TrendDaily = buildTrendDaily(bars);
+  if (daily.t.length < 400) {
+    await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: "S0-static", failedReason: `not enough daily bars for ${doc.symbol}` });
+    return { passed: false, stage: "S0-static" };
+  }
+  const sealIdx = daily.t.findIndex((t) => t >= sealTs);
+  const sl = <T>(a: T[]): T[] => sealIdx >= 0 ? a.slice(sealIdx) : [];
+  const dailySealed: TrendDaily | undefined = sealIdx >= 0 && daily.t.length - sealIdx > 60
+    ? { t: sl(daily.t), ret: sl(daily.ret), close: sl(daily.close), funding: sl(daily.funding) }
+    : undefined;
+
+  const nTrials = await cx.query(api.candidates.familySeenCount, { familyHash: cand.familyHash });
+  await cx.mutation(api.pipeline.bumpCounter, { key: "trials_total", by: 1 });
+
+  const report = runGauntletTrend({ doc, daily, dailySealed, sealTs, floors: cfg.floors, nTrialsTotal: Math.max(nTrials, 40), log });
+  for (const s of report.stages) {
+    await cx.mutation(api.pipeline.addGateReport, { candidateId, stage: s.stage, passed: s.passed, reason: s.reason, report: JSON.stringify(s.detail ?? {}).slice(0, 20_000), durationMs: s.durationMs });
+  }
+  const curvesJson = JSON.stringify(report.curves ?? {});
+
+  if (!report.passed) {
+    const partial = report.metrics.wfPooledSharpe !== undefined ? 0.5 * report.metrics.wfPooledSharpe : undefined;
+    // BOOK/FORWARD-PAPER GATE: a trend-beta sleeve that failed standalone S5tb-DSR
+    // is exactly the risk-managed-beta we want forward-tested — route it through
+    // the same book-marginal / forward-paper gate.
+    if (cfg.book.marginalGate && report.failedStage === "S5tb-stats" && (report.failedReason ?? "").startsWith("DSR") && report.portfolioOos && report.portfolioOos.ret.length >= 100) {
+      try {
+        const admitted = await bookGatePromote(cx, cand, candidateId, report, cfg, ppy, log);
+        if (admitted) return { passed: true, composite: report.metrics.portOosSharpe };
+      } catch (e) { log(`trend book-gate skipped: ${e instanceof Error ? e.message.slice(0, 100) : e}`); }
+    }
+    await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: report.failedStage, failedReason: report.failedReason, metrics: JSON.stringify(report.metrics), curves: curvesJson, composite: partial });
+    await cx.mutation(api.pipeline.addLesson, { source: cand.source, candidateId, stage: report.failedStage, text: `TRENDBETA FAILED ${report.failedStage}: "${cand.name}" — ${report.failedReason}` });
+    log(`TRENDBETA FAILED at ${report.failedStage}: ${report.failedReason}`);
+    return { passed: false, stage: report.failedStage };
+  }
+
+  await cx.mutation(api.paper.ensureAccount, { candidateId, startEquity: cfg.paperStartEquity });
+  await cx.mutation(api.candidates.updateStage, {
+    id: candidateId, stage: "incubating",
+    metrics: JSON.stringify(report.metrics), bestParams: JSON.stringify(report.bestParams ?? {}),
+    curves: curvesJson, composite: report.metrics.composite ?? report.metrics.portOosSharpe, incubationStartedAt: Date.now(),
+  });
+  await cx.mutation(api.pipeline.addLesson, { source: cand.source, candidateId, text: `TRENDBETA PASSED: "${cand.name}" risk-managed-beta sleeve (OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)}, dsr ${(report.metrics.dsr ?? 0).toFixed(2)}) -> 30-day paper incubation.` });
+  log(`TRENDBETA PASSED -> incubating (OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)})`);
   return { passed: true, composite: report.metrics.composite };
 }

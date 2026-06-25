@@ -12,6 +12,7 @@ import { DEFAULT_FEE_BPS, PPY, SLIP_BPS, type Bars, type StrategyDoc } from "../
 import { isIvSleeve, buildIvDaily, type IvSleeveDoc } from "../engine/ivsleeve";
 import { isOcSleeve } from "../engine/onchainsleeve";
 import { isXSection } from "../engine/xsection";
+import { isTrendBeta, buildTrendDaily, type TrendBetaDoc } from "../engine/trendbeta";
 import { loadDvol, dvolMap, dvolCurrencyFor } from "../lib/deribit";
 import { sendTelegram } from "../lib/telegram";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -79,6 +80,49 @@ async function ivForwardStep(
     const tradeCost = Math.abs(wTo - prevWeight) * (DEFAULT_FEE_BPS / 1e4 + slip);
     portRet -= tradeCost;
     trades.push({ symbol: doc.symbol, ts: S.t[i], weightFrom: prevWeight, weightTo: wTo, price: closeI, fillPrice: closeI * (1 + side * slip), costUsd: tradeCost * equity, note: `iv:${doc.signal}` });
+  }
+  const newPositions = [{ symbol: doc.symbol, weight: Math.abs(wTo - prevWeight) > 0.02 ? wTo : prevWeight, entryPrice: closeI }];
+  return { stepTs: S.t[i], portRet, newPositions, trades };
+}
+
+// TREND-BETA forward step: long-flat ONE coin when close > SMA(win), else flat.
+// Decision at the latest CLOSED day uses closes <= that day (point-in-time SMA, no
+// look-ahead). Charges fee+slip on flips + funding while long. Same paper P&L path.
+async function trendForwardStep(
+  doc: TrendBetaDoc, params: Record<string, number>, equity: number,
+  prevWeight: number, prevPrice: number, lastStepTs: number | undefined,
+): Promise<ForwardStep | null> {
+  const bars = await loadBars(doc.symbol, "1d");
+  if (!bars) return null;
+  const S = buildTrendDaily(bars);
+  const n = S.t.length;
+  const win = Math.max(20, Math.round(params.smaWin ?? doc.smaWin));
+  if (n < win + 2) return null;
+  const SLIP_D: Record<string, number> = { "BTC/USDT": 1.5, "ETH/USDT": 2, "SOL/USDT": 3 };
+  const slip = (SLIP_D[doc.symbol] ?? 3) / 1e4;
+  const maxLev = Math.max(1, doc.risk.maxLeverage ?? 1);
+  const i = n - 1;                                   // latest CLOSED day
+  const closeI = bars.c[bars.c.length - 1];
+  // mark-to-market: prev weight earned the move into day i
+  let portRet = 0;
+  if (prevWeight !== 0 && prevPrice > 0) portRet += prevWeight * (closeI / prevPrice - 1);
+  // funding while long since last step (point-in-time)
+  if (bars.fundingT && bars.fundingR && lastStepTs) {
+    for (let fi = bars.fundingT.length - 1; fi >= 0; fi--) {
+      const ft = bars.fundingT[fi];
+      if (ft <= lastStepTs) break;
+      if (ft <= Date.now()) portRet -= prevWeight * bars.fundingR[fi];
+    }
+  }
+  // SMA over closes (i-win, i] — only info <= i (no look-ahead)
+  let sma = 0; for (let k = i - win + 1; k <= i; k++) sma += S.close[k]; sma /= win;
+  const wTo = S.close[i] > sma ? maxLev : 0;          // long if above SMA, else flat
+  const trades: ForwardStep["trades"] = [];
+  if (Math.abs(wTo - prevWeight) > 0.02) {
+    const side = Math.sign(wTo - prevWeight);
+    const tradeCost = Math.abs(wTo - prevWeight) * (DEFAULT_FEE_BPS / 1e4 + slip);
+    portRet -= tradeCost;
+    trades.push({ symbol: doc.symbol, ts: S.t[i], weightFrom: prevWeight, weightTo: wTo, price: closeI, fillPrice: closeI * (1 + side * slip), costUsd: tradeCost * equity, note: `trend:sma${win}` });
   }
   const newPositions = [{ symbol: doc.symbol, weight: Math.abs(wTo - prevWeight) > 0.02 ? wTo : prevWeight, entryPrice: closeI }];
   return { stepTs: S.t[i], portRet, newPositions, trades };
@@ -169,6 +213,13 @@ export const paperStep = schedules.task({
           const cur = posBySym.get(rawDoc.symbol);
           const step = await ivForwardStep(rawDoc, params, acct.equity, cur?.weight ?? 0, cur?.entryPrice ?? 0, acct.lastStepTs);
           if (!step) { logger.log(`iv sleeve "${cand.name}": DVOL/bars unavailable, skipped`); continue; }
+          stepTs = step.stepTs; portRet = step.portRet; newPositions = step.newPositions; trades = step.trades;
+          for (const t of trades) costUsd += t.costUsd;
+        } else if (isTrendBeta(rawDoc)) {
+          // trend-beta trades ONE coin long-flat from the point-in-time SMA filter.
+          const cur = posBySym.get(rawDoc.symbol);
+          const step = await trendForwardStep(rawDoc, params, acct.equity, cur?.weight ?? 0, cur?.entryPrice ?? 0, acct.lastStepTs);
+          if (!step) { logger.log(`trend sleeve "${cand.name}": bars unavailable, skipped`); continue; }
           stepTs = step.stepTs; portRet = step.portRet; newPositions = step.newPositions; trades = step.trades;
           for (const t of trades) costUsd += t.costUsd;
         } else if (isOcSleeve(rawDoc) || isXSection(rawDoc)) {

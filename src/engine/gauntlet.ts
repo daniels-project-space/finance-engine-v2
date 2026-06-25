@@ -25,6 +25,7 @@ import { DEFAULT_FEE_BPS, SLIP_BPS, PPY, tfScale, type Bars, type Expr, type Gat
 import { type XSectionDoc, type XAligned, backtestXSection, walkForwardXSection } from "./xsection";
 import { type IvSleeveDoc, type IvDaily, backtestIv, walkForwardIv } from "./ivsleeve";
 import { type OcSleeveDoc, type OcDaily, backtestOc, walkForwardOc } from "./onchainsleeve";
+import { type TrendBetaDoc, type TrendDaily, backtestTrend, walkForwardTrend } from "./trendbeta";
 
 /** Largest indicator lookback in bars, resolving param-valued periods. Used to
  *  size the purge window + embargo for the leakage-cleaned WF (shadow). */
@@ -1018,4 +1019,89 @@ export function sliceBars(bars: Bars, fromI: number, toI: number): Bars {
     spotC: bars.spotC ? bars.spotC.slice(fromI, toI + 1) : undefined,
     oiT: oiS.t, oiV: oiS.v, lsrT: lsrS.t, lsrR: lsrS.v,
   };
+}
+
+// =====================================================================
+// TREND-BETA GAUNTLET (adapted path for TrendBetaDoc). Risk-managed long beta =
+// ONE daily stream, so S4 cross-symbol is SKIPPED; purged WF (re-pick smaWin) +
+// DSR/bootstrap + sealed on the stream. SAME floor values + SAME validated math
+// (dsr/bootstrapSharpeCI). Promotion routes through the book gate / forward-paper.
+// =====================================================================
+export interface TrendInputs {
+  doc: TrendBetaDoc;
+  daily: TrendDaily;
+  dailySealed?: TrendDaily;
+  sealTs: number;
+  floors: GateFloors;
+  nTrialsTotal: number;
+  log?: (msg: string) => void;
+}
+
+export function runGauntletTrend(g: TrendInputs): GauntletReport {
+  const stages: StageOutcome[] = [];
+  const metrics: GauntletReport["metrics"] = {};
+  const curves: GauntletReport["curves"] = {};
+  const t0 = () => Date.now();
+  const { doc, daily, floors } = g;
+  const ppy = 365;
+  let portCarry: { t: number[]; ret: number[] } | undefined;
+  const fail = (stage: string, reason: string, started: number, detail?: unknown): GauntletReport => {
+    stages.push({ stage, passed: false, reason, detail, durationMs: Date.now() - started });
+    return { passed: false, failedStage: stage, failedReason: reason, stages, metrics, curves, portfolioOos: portCarry };
+  };
+
+  const devEnd = (() => { let e = daily.t.length - 1; while (e > 0 && daily.t[e] >= g.sealTs) e--; return e; })();
+  if (devEnd < 400) return fail("S0-static", `not enough pre-seal days (${devEnd})`, t0());
+  stages.push({ stage: "S0-static", passed: true, durationMs: 0 });
+
+  // ---- S3tb purged walk-forward on the trend-beta stream --------------------
+  let started = t0();
+  const wf = walkForwardTrend(doc, daily, { trainMonths: 12, stepMonths: 4, endTs: g.sealTs });
+  metrics.wfPooledSharpe = wf.pooledSharpe; metrics.wfPctPositive = wf.pctPositive; metrics.wfMaxDD = wf.pooledMaxDD;
+  metrics.portOosSharpe = wf.pooledSharpe; metrics.portPctPositive = wf.pctPositive; metrics.portMaxDD = wf.pooledMaxDD;
+  metrics.wfWorstMonth = wf.worstWindowRet;
+  if (wf.pooledRet.length > 10) {
+    const eq = new Float64Array(wf.pooledRet.length); let acc = 1;
+    for (let i = 0; i < wf.pooledRet.length; i++) { acc *= 1 + wf.pooledRet[i]; eq[i] = acc; }
+    curves.port = downsampleCurve(Array.from(wf.pooledT, Number), eq, 0, eq.length - 1, 240);
+    portCarry = { t: Array.from(wf.pooledT, Number), ret: Array.from(wf.pooledRet, Number) };
+  }
+  if (wf.windows < 6) return fail("S3tb-walkforward", `only ${wf.windows} WF windows`, started, { windows: wf.windows });
+  if (wf.pooledSharpe < floors.wfMinMeanSharpe) return fail("S3tb-walkforward", `OOS sharpe ${wf.pooledSharpe.toFixed(2)} < ${floors.wfMinMeanSharpe}`, started, { sharpe: wf.pooledSharpe });
+  if (wf.pooledMaxDD < floors.wfMaxDD) return fail("S3tb-walkforward", `OOS maxDD ${(wf.pooledMaxDD * 100).toFixed(0)}%`, started, { maxDD: wf.pooledMaxDD });
+  if (wf.pooledSharpe < floors.portMinSharpe) return fail("S4tb-portfolio", `trend OOS sharpe ${wf.pooledSharpe.toFixed(2)} < ${floors.portMinSharpe}`, started, { sharpe: wf.pooledSharpe });
+  stages.push({ stage: "S3tb-walkforward", passed: true, durationMs: Date.now() - started, detail: { windows: wf.windows, sharpe: wf.pooledSharpe } });
+  g.log?.(`S3tb pass oosSharpe=${wf.pooledSharpe.toFixed(2)} windows=${wf.windows}`);
+
+  // ---- S5tb statistics (DSR + bootstrap on the OOS stream) — validated math --
+  started = t0();
+  const oos = wf.pooledRet;
+  const d = dsr(oos, 2, oos.length - 1, Math.max(g.nTrialsTotal, 10), ppy);
+  metrics.dsr = d;
+  if (d < floors.minDSR) return fail("S5tb-stats", `DSR ${d.toFixed(3)} < ${floors.minDSR} (deflated for ${g.nTrialsTotal} trials)`, started, { dsr: d });
+  const boot = bootstrapSharpeCI(oos, 2, oos.length - 1, ppy);
+  metrics.bootstrapP5 = boot.p5;
+  if (boot.lo <= 0) return fail("S5tb-stats", `bootstrap 95% CI includes zero [${boot.lo.toFixed(2)}, ${boot.hi.toFixed(2)}]`, started, boot);
+  stages.push({ stage: "S5tb-stats", passed: true, durationMs: Date.now() - started, detail: { dsr: d, bootstrap: boot } });
+  g.log?.(`S5tb pass dsr=${d.toFixed(3)} ciLo=${boot.lo.toFixed(2)}`);
+
+  // ---- S6tb sealed holdout on the post-seal window --------------------------
+  started = t0();
+  if (g.dailySealed && g.dailySealed.t.length > 60) {
+    const med = (key: string): number | undefined => { const v = wf.bestParamsByWindow.map((p) => p[key]).filter((x) => x !== undefined).sort((a, b) => a - b); return v.length ? v[Math.floor(v.length / 2)] : undefined; };
+    const sealedBt = backtestTrend(doc, g.dailySealed, { smaWin: med("smaWin") ?? doc.smaWin }, {});
+    let s = 0, sq = 0, c = 0, eq = 1; for (let i = doc.smaWin + 2; i < sealedBt.ret.length; i++) { s += sealedBt.ret[i]; sq += sealedBt.ret[i] * sealedBt.ret[i]; c++; eq *= 1 + sealedBt.ret[i]; }
+    const m = s / Math.max(1, c), sd = Math.sqrt(Math.max(0, sq / Math.max(1, c) - m * m));
+    const sealedSharpe = sd > 1e-12 ? (m / sd) * Math.sqrt(365) : 0;
+    metrics.composite = 0.6 * wf.pooledSharpe + 0.4 * sealedSharpe;
+    if (sealedSharpe < floors.sealedMinSharpe) return fail("S6tb-sealed", `sealed trend sharpe ${sealedSharpe.toFixed(2)} < ${floors.sealedMinSharpe}`, started, { sharpe: sealedSharpe });
+    if (eq - 1 <= 0) return fail("S6tb-sealed", `sealed return ${((eq - 1) * 100).toFixed(1)}% <= 0`, started, { ret: eq - 1 });
+    stages.push({ stage: "S6tb-sealed", passed: true, durationMs: Date.now() - started, detail: { sharpe: sealedSharpe } });
+    g.log?.(`S6tb pass sealed sharpe=${sealedSharpe.toFixed(2)}`);
+  } else {
+    metrics.composite = wf.pooledSharpe;
+    stages.push({ stage: "S6tb-sealed", passed: true, durationMs: Date.now() - started, detail: { note: "no sealed window" } });
+  }
+  const finalParams: Record<string, number> = { smaWin: doc.smaWin };
+  return { passed: true, stages, metrics, bestParams: finalParams, curves, portfolioOos: portCarry };
 }

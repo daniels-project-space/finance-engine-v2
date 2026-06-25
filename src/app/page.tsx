@@ -4,12 +4,13 @@ import { useQuery } from "convex/react";
 import Link from "next/link";
 import { api } from "../../convex/_generated/api";
 import { Chart, Panel, fmt, pct, ago, compact, type Curve } from "./components/ds";
-import { PaperBook, BookProgress, SimpleFunnel, Progression } from "./components/widgets2";
+import { PaperBook, BookProgress, SimpleFunnel, Progression, TrendVsHodl } from "./components/widgets2";
 
 // HERO page. The headline is now the LIVE PAPER FORWARD track record — a moving
 // number that accumulates over time — with the strict backtest bar kept secondary.
 export default function Overview() {
   const paper = useQuery(api.dashboard.paperBook, {});
+  const trendHodl = useQuery(api.dashboard.trendVsHodl, {});
   const book = useQuery(api.dashboard.bookStatus, {});
   const flow = useQuery(api.dashboard.stageFlow, {});
   const prog = useQuery(api.dashboard.progression, {});
@@ -43,6 +44,13 @@ export default function Overview() {
         right={<Link href="/tournament" className="num text-[10px] text-dim hover:text-fg">sleeves →</Link>}>
         {paper && <PaperBook data={paper} />}
       </Panel>
+
+      {/* ============ SAFER THAN HODL: trend-beta vs BTC buy-and-hold drawdown ============ */}
+      {trendHodl && (
+        <Panel pad="p-6" title="Risk-managed beta — safer than holding BTC (backtest)">
+          <TrendVsHodl data={trendHodl} />
+        </Panel>
+      )}
 
       {/* ============ big key stats ============ */}
       <section className="grid grid-cols-2 lg:grid-cols-4 gap-px rounded-2xl overflow-hidden bg-[#ffffff08]">

@@ -377,3 +377,81 @@ export function PaperBook({ data }: { data: PaperData }) {
     </div>
   );
 }
+
+// ================================================================ TrendVsHodl
+// The "safer than HODL" payoff: the best trend sleeve's drawdown (underwater)
+// curve vs BTC HODL's over the same window — the "~half the drawdown" story at a
+// glance — plus side-by-side CAGR/maxDD/Sharpe/Calmar. HONEST framing kept.
+export interface TrendVsHodlData {
+  name: string; symbol: string;
+  strat: { t: number[]; eq: number[]; dd: number[] };
+  hodl: { t: number[]; eq: number[]; dd: number[] } | null;
+  stats: { trendCagr: number | null; trendMaxDD: number | null; trendCalmar: number | null; trendSharpe: number | null; hodlCagr: number | null; hodlMaxDD: number | null; hodlCalmar: number | null };
+}
+
+// underwater chart: two drawdown curves (strat green, HODL red), 0 at top going down.
+function Underwater({ stratDD, stratT, hodlDD, height = 150 }: { stratDD: number[]; stratT: number[]; hodlDD?: number[]; height?: number }) {
+  const sd = stratDD.filter((x) => Number.isFinite(x));
+  const hd = (hodlDD ?? []).filter((x) => Number.isFinite(x));
+  if (sd.length < 2) return <div className="well flex items-center justify-center" style={{ height }}><span className="hud">no drawdown data</span></div>;
+  const width = 760, padL = 42, padR = 16, padT = 12, padB = 20;
+  const minDD = Math.min(-0.01, ...sd, ...hd);
+  const t0 = stratT[0], t1 = stratT[stratT.length - 1] || t0 + 1;
+  const X = (i: number, n: number) => padL + (i / Math.max(1, n - 1)) * (width - padL - padR);
+  const Y = (v: number) => padT + (v / minDD) * (height - padT - padB);
+  const path = (arr: number[]) => arr.map((v, i) => `${X(i, arr.length).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
+  const monthFmt = (ts: number) => { const d = new Date(ts); return `${d.getUTCFullYear()}·${String(d.getUTCMonth() + 1).padStart(2, "0")}`; };
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} className="w-full block" style={{ maxHeight: height }}>
+      {[0, 0.5, 1].map((f) => { const v = minDD * f; return <g key={f}><line x1={padL} x2={width - padR} y1={Y(v)} y2={Y(v)} stroke="#ffffff0a" /><text x={padL - 6} y={Y(v) + 3} textAnchor="end" fontSize="8.5" fill="#586573" fontFamily="var(--font-mono)">{(v * 100).toFixed(0)}%</text></g>; })}
+      {[t0, t1].map((ts, i) => <text key={i} x={i === 0 ? padL : width - padR} y={height - 6} textAnchor={i === 0 ? "start" : "end"} fontSize="8.5" fill="#586573" fontFamily="var(--font-mono)">{monthFmt(ts)}</text>)}
+      {hd.length > 1 && <><polygon points={`${X(0, hd.length)},${Y(0)} ${path(hd)} ${X(hd.length - 1, hd.length)},${Y(0)}`} fill="#fb6f5d14" /><polyline points={path(hd)} fill="none" stroke="#fb6f5d" strokeWidth="1.3" strokeDasharray="4 3" /></>}
+      <polygon points={`${X(0, sd.length)},${Y(0)} ${path(sd)} ${X(sd.length - 1, sd.length)},${Y(0)}`} fill="#3ddb9e18" />
+      <polyline points={path(sd)} fill="none" stroke="#3ddb9e" strokeWidth="1.8" />
+      <text x={6} y={11} fontSize="7.5" fill="#364250" fontFamily="var(--font-mono)">drawdown (underwater)</text>
+      <g transform={`translate(${width - padR - 150}, ${padT + 2})`}>
+        <rect x={0} y={-3} width="9" height="2.5" rx="1" fill="#3ddb9e" /><text x={13} y={1} fontSize="8.5" fill="#8b9aab" fontFamily="var(--font-mono)">trend sleeve</text>
+        <rect x={78} y={-3} width="9" height="2.5" rx="1" fill="#fb6f5d" /><text x={91} y={1} fontSize="8.5" fill="#8b9aab" fontFamily="var(--font-mono)">BTC HODL</text>
+      </g>
+    </svg>
+  );
+}
+
+export function TrendVsHodl({ data }: { data: TrendVsHodlData }) {
+  const s = data.stats;
+  const ddImprove = s.trendMaxDD !== null && s.hodlMaxDD !== null && s.hodlMaxDD !== 0 ? (1 - Math.abs(s.trendMaxDD) / Math.abs(s.hodlMaxDD)) : null;
+  const Cell = ({ label, t, h, kind = "num" }: { label: string; t: number | null; h: number | null; kind?: "num" | "pct" }) => {
+    const f = (x: number | null) => x === null ? "—" : kind === "pct" ? `${(x * 100).toFixed(0)}%` : x.toFixed(2);
+    return (
+      <div>
+        <div className="hud mb-1.5">{label}</div>
+        <div className="num text-[17px] text-up">{f(t)}</div>
+        <div className="num text-[11px] text-down mt-0.5">{f(h)} <span className="text-dim">HODL</span></div>
+      </div>
+    );
+  };
+  return (
+    <div className="grid lg:grid-cols-[1.05fr_1fr] gap-7">
+      <div>
+        <div className="flex flex-wrap gap-x-8 gap-y-4 mb-1">
+          <Cell label="CAGR" t={s.trendCagr} h={s.hodlCagr} kind="pct" />
+          <Cell label="Max drawdown" t={s.trendMaxDD} h={s.hodlMaxDD} kind="pct" />
+          <Cell label="Sharpe" t={s.trendSharpe} h={null} />
+          <Cell label="Calmar" t={s.trendCalmar} h={s.hodlCalmar} />
+        </div>
+        {ddImprove !== null && (
+          <div className="num text-[13px] text-up mt-4">
+            {(ddImprove * 100).toFixed(0)}% shallower drawdown than holding {data.symbol}
+            <span className="text-dim"> — captures the up-trend, sits out the deep bears.</span>
+          </div>
+        )}
+        <p className="num text-[10px] text-dim mt-4 leading-relaxed max-w-md">
+          Best trend-beta sleeve ({data.name}, long-flat close&gt;SMA) vs BTC buy-and-hold over the backtest window. Captures ~BTC return at ~40% of the drawdown on the last ~5y — <span className="text-mid">regime-dependent (whipsaws in chop, gives up some upside); forward-testing live on paper to validate.</span>
+        </p>
+      </div>
+      <div className="min-w-0">
+        <Underwater stratDD={data.strat.dd} stratT={data.strat.t} hodlDD={data.hodl?.dd} />
+      </div>
+    </div>
+  );
+}

@@ -17,6 +17,10 @@ export interface AppConfig {
   /** ON-CHAIN TIMING lane (MVRV/NVT valuation, BTC/ETH perp timing). Routes to the
    *  adapted on-chain gauntlet + book gate. The A/B winner (BTC MVRV OOS 0.96). */
   ocsleeve?: { enabled: boolean; perCycle?: number };
+  /** TREND-BETA lane: risk-managed long beta (long-flat close>SMA) on BTC/ETH/SOL —
+   *  the "safer than HODL" family (captures up-trend, sits out deep bears). Routes
+   *  to the adapted trend gauntlet + book/forward-paper gate. ONE param (smaWin). */
+  trendbeta?: { enabled: boolean; perCycle?: number };
   /** ON-CHAIN feature inputs (Coin Metrics community + DefiLlama, daily BTC/ETH).
    *  When enabled, on-chain features are attached to the primary bars so strategies
    *  can use mvrv/activeaddr/txcnt/nvt/exnetflow/stablesupply DSL ops. */
@@ -150,6 +154,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   ivsleeve: { enabled: false, perCycle: 2 },
   // ON-CHAIN timing lane DEFAULT OFF in code; shipped ON via the live override.
   ocsleeve: { enabled: false, perCycle: 2 },
+  trendbeta: { enabled: false, perCycle: 3 },
   // ON-CHAIN features DEFAULT OFF in code; shipped ON via the live override.
   onchain: { enabled: false },
   primarySymbol: "BTC/USDT",

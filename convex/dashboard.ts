@@ -258,9 +258,9 @@ export const paperBook = query({
   args: {},
   handler: async (ctx) => {
     const stages = ["incubating", "eligible", "champion"];
-    const sleeves: { id: string; name: string; source: string; family: string; forwardSeed: boolean; startEq: number; equity: number; peak: number; days: number; ret: number; sharpe: number | null; maxDD: number; halted: boolean; bars: number; spark: number[] }[] = [];
+    const sleeves: { id: string; name: string; source: string; family: string; forwardSeed: boolean; startEq: number; equity: number; peak: number; days: number; ret: number; sharpe: number | null; maxDD: number; halted: boolean; bars: number; spark: number[]; vsHodl?: { trendCagr: number; trendMaxDD: number; trendCalmar: number; hodlCagr: number; hodlMaxDD: number; hodlCalmar: number } }[] = [];
     const PPY = 8760; // hourly paper steps
-    const fam = (s: string) => s === "xsection" ? "Cross-sectional" : s === "ivsleeve" ? "IV-timing" : s === "onchain" ? "On-chain" : "DSL";
+    const fam = (s: string) => s === "xsection" ? "Cross-sectional" : s === "ivsleeve" ? "IV-timing" : s === "onchain" ? "On-chain" : s === "trendbeta" ? "Trend-beta" : "DSL";
     // collect all snapshots keyed by timestamp for the combined book curve
     const perTsRet = new Map<number, { sum: number; n: number }>();
 
@@ -285,6 +285,8 @@ export const paperBook = query({
           days: (Date.now() - startedAt) / 86400_000, ret: (acct.equity / (10000)) - 1,
           sharpe, maxDD, halted: !!acct.halted, bars: rets.length,
           spark: eqs.slice(-60),
+          // backtest vs-HODL stats (trend-beta sleeves carry these) — the "safer than HODL" story
+          vsHodl: m.hodlMaxDD !== undefined ? { trendCagr: m.trendCagr ?? 0, trendMaxDD: m.trendMaxDD ?? 0, trendCalmar: m.trendCalmar ?? 0, hodlCagr: m.hodlCagr ?? 0, hodlMaxDD: m.hodlMaxDD ?? 0, hodlCalmar: m.hodlCalmar ?? 0 } : undefined,
         });
         // accumulate equal-weight book returns by timestamp
         for (const s of snaps) {
@@ -316,6 +318,55 @@ export const paperBook = query({
       days,
       book: { t: bookT, eq: bookEq, sharpe: bookSharpe, ret: bookEq.length ? bookEq[bookEq.length - 1] - 1 : 0, maxDD: bookDD, bars: bookRets.length },
       sleeves,
+    };
+  },
+});
+
+/**
+ * TREND vs HODL drawdown comparison — the "safer than HODL" payoff. Returns the
+ * best trend-beta sleeve's BACKTEST equity (its WF OOS curve) + an UNDERWATER
+ * (drawdown) curve, alongside BTC HODL rebased over the SAME window + its
+ * drawdown, so the dashboard can show "~half the drawdown" at a glance. Plus the
+ * side-by-side CAGR/maxDD/Sharpe/Calmar stats from the persisted metrics.
+ */
+export const trendVsHodl = query({
+  args: {},
+  handler: async (ctx) => {
+    // pick the strongest trend-beta sleeve (by composite/OOS Sharpe), any stage.
+    const rows = await ctx.db.query("candidates").withIndex("by_composite").order("desc").take(60);
+    const tb = rows.filter((r) => r.source === "trendbeta" && r.curves);
+    if (!tb.length) return null;
+    const best = tb[0];
+    let curve: { t: number[]; eq: number[] } | null = null;
+    try { const cv = JSON.parse(best.curves!) as { wf?: { t: number[]; eq: number[] }; port?: { t: number[]; eq: number[] } }; curve = cv.wf ?? cv.port ?? null; } catch { /* */ }
+    if (!curve || !curve.t?.length) return null;
+    const m = parseMetrics(best.metrics);
+    // rebase BTC HODL benchmark over the trend curve's window
+    const btcCfg = await ctx.db.query("config").withIndex("by_key", (q) => q.eq("key", "benchmark_btc")).first();
+    let hodl: { t: number[]; eq: number[] } | null = null;
+    if (btcCfg) {
+      try {
+        const b = JSON.parse(btcCfg.json) as { t: number[]; c: number[] };
+        const t0 = curve.t[0], t1 = curve.t[curve.t.length - 1];
+        const t: number[] = [], eq: number[] = []; let base = 0;
+        for (let i = 0; i < Math.min(b.t.length, b.c.length); i++) {
+          const ts = b.t[i], cl = b.c[i];
+          if (ts < t0 || ts > t1 || !Number.isFinite(cl) || cl <= 0) continue;
+          if (!base) base = cl; t.push(ts); eq.push(cl / base);
+        }
+        if (t.length > 2) hodl = { t, eq };
+      } catch { /* */ }
+    }
+    // underwater (drawdown) curves
+    const underwater = (c: { t: number[]; eq: number[] }) => { const out: number[] = []; let peak = -Infinity; for (const v of c.eq) { peak = Math.max(peak, v); out.push(peak > 0 ? v / peak - 1 : 0); } return out; };
+    return {
+      name: best.name, symbol: (best.name.match(/tb_(\w+?)_/)?.[1] ?? "btc").toUpperCase(),
+      strat: { t: curve.t, eq: curve.eq, dd: underwater(curve) },
+      hodl: hodl ? { t: hodl.t, eq: hodl.eq, dd: underwater(hodl) } : null,
+      stats: {
+        trendCagr: m.trendCagr ?? null, trendMaxDD: m.trendMaxDD ?? null, trendCalmar: m.trendCalmar ?? null, trendSharpe: m.wfPooledSharpe ?? m.portOosSharpe ?? null,
+        hodlCagr: m.hodlCagr ?? null, hodlMaxDD: m.hodlMaxDD ?? null, hodlCalmar: m.hodlCalmar ?? null,
+      },
     };
   },
 });
