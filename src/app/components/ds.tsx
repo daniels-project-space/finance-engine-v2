@@ -226,14 +226,20 @@ export function Chart({ series, height = 220, yLabel = "growth of $1", showArea 
         return <text key={`v${s.name}`} x={width - padR + 4} y={Y(lv) + 3} fontSize="9" fill={s.color} fontFamily="var(--font-mono)">{lv.toFixed(2)}×</text>;
       })}
       {(() => {
-        const itemW = 96;
-        const startX = Math.max(padL + 64, width - padR - all.length * itemW);
-        return all.map((s, i) => (
-          <g key={`l${s.name}`} transform={`translate(${startX + i * itemW}, ${padT - 4})`}>
-            <rect x={0} y={-3} width="9" height="2.5" rx="1" fill={s.color} />
-            <text x={13} y={1} fontSize="8.5" fill="#8b9aab" fontFamily="var(--font-mono)">{s.name}</text>
-          </g>
-        ));
+        // legend widths scale with each label so longer names never overlap;
+        // the block is right-aligned within the plot, clear of the y-axis.
+        const widths = all.map((s) => 16 + s.name.length * 5.1 + 12);
+        const total = widths.reduce((a, b) => a + b, 0);
+        let x = Math.max(padL + 40, width - padR - total);
+        return all.map((s, i) => {
+          const gx = x; x += widths[i];
+          return (
+            <g key={`l${s.name}`} transform={`translate(${gx}, ${padT - 4})`}>
+              <rect x={0} y={-3} width="9" height="2.5" rx="1" fill={s.color} />
+              <text x={13} y={1} fontSize="8.5" fill="#8b9aab" fontFamily="var(--font-mono)">{s.name}</text>
+            </g>
+          );
+        });
       })()}
       <text x={6} y={11} fontSize="7.5" fill="#364250" fontFamily="var(--font-mono)">{yLabel}</text>
     </svg>

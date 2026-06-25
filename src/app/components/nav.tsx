@@ -7,7 +7,7 @@ const PRIMARY = [
   { href: "/", label: "Overview" },
   { href: "/pipeline", label: "Pipeline" },
   { href: "/sleeves", label: "Sleeves" },
-  { href: "/tournament", label: "Tournament" },
+  { href: "/tournament", label: "Leaderboard" },
   { href: "/data", label: "Data" },
 ];
 const SECONDARY = [
