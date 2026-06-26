@@ -195,6 +195,24 @@ function genFilter(rng: Rng, params: Record<string, ParamSpec>): Expr {
     const ma: Expr = { op: "sma", src: close, period: freshParam(params, 100, 400, 200) };
     return { op: "gt", a: close, b: ma };
   }
+  if (rng() < 0.55) {
+    // CHOP-PROTECTION gate: trade only when the market is genuinely TRENDING (not
+    // sideways/whipsawing). The canonical anti-whipsaw filters.
+    const cg = rng();
+    if (cg < 0.4) {
+      // ADX > threshold: trend STRENGTH present (sit out chop)
+      const period = freshParam(params, 7, 30, 14);
+      return { op: "gt", a: { op: "adx", src: close, period }, b: freshParam(params, 18, 35, 25, false) };
+    }
+    if (cg < 0.75) {
+      // Kaufman efficiency ratio > threshold: directional efficiency (clean trend)
+      const period = freshParam(params, 10, 60, 20);
+      return { op: "gt", a: { op: "effratio", src: close, period }, b: freshParam(params, 0.25, 0.6, 0.4, false) };
+    }
+    // Choppiness index BELOW threshold: not sideways
+    const period = freshParam(params, 10, 30, 14);
+    return { op: "lt", a: { op: "choppiness", src: close, period }, b: freshParam(params, 38, 60, 50, false) };
+  }
   // vol regime: ATR pctrank below a cap (avoid chaos) or above a floor (need movement)
   const volRank: Expr = { op: "pctrank", src: { op: "atr", src: close, period: { op: "const", value: 14 } }, period: { op: "const", value: 150 } };
   const th = freshParam(params, 0.1, 0.9, 0.5, false);
@@ -300,6 +318,7 @@ export function recipeOf(source: string, mutation?: string): string {
   if (m.startsWith("op_swap")) return "gp-op:op_swap";
   if (m.startsWith("param_shift")) return "gp-op:param_shift";
   if (m === "add_filter") return "gp-op:add_filter";
+  if (m === "chop_gate") return "gp-op:chop_gate";
   if (m === "remove_filter") return "gp-op:remove_filter";
   if (m === "new_exit") return "gp-op:new_exit";
   if (m === "drop_shorts" || m === "add_shorts") return "gp-op:toggle_shorts";
@@ -404,13 +423,26 @@ export function mutateStrategy(parent: StrategyDoc, seed: number, hint?: Mutatio
         p.min = Math.min(p.min, p.default);
         p.max = Math.max(p.max, p.default);
         mutation = `param_shift:${k}x${factor.toFixed(2)}`;
-      } else if (kind < 0.55) {
-        // add a regime filter conjunct to the entry
+      } else if (kind < 0.48) {
+        // add a generic regime filter conjunct to the entry
         const params = doc.params;
         const filter = genFilter(rng, params);
         doc.longEntry = { op: "and", a: filter, b: doc.longEntry };
         if (doc.shortEntry) doc.shortEntry = { op: "and", a: invertBool(filter), b: doc.shortEntry };
         mutation = "add_filter";
+      } else if (kind < 0.55) {
+        // CHOP-GATE: attach an explicit trend-quality / anti-whipsaw gate (ADX /
+        // efficiency-ratio / choppiness) to BOTH long and short — sit out chop.
+        const close: Expr = { op: "price", field: "close" };
+        const cg = rng();
+        const gate: Expr = cg < 0.4
+          ? { op: "gt", a: { op: "adx", src: close, period: freshParam(doc.params, 7, 30, 14) }, b: freshParam(doc.params, 18, 35, 25, false) }
+          : cg < 0.75
+          ? { op: "gt", a: { op: "effratio", src: close, period: freshParam(doc.params, 10, 60, 20) }, b: freshParam(doc.params, 0.25, 0.6, 0.4, false) }
+          : { op: "lt", a: { op: "choppiness", src: close, period: freshParam(doc.params, 10, 30, 14) }, b: freshParam(doc.params, 38, 60, 50, false) };
+        doc.longEntry = { op: "and", a: gate, b: doc.longEntry };
+        if (doc.shortEntry) doc.shortEntry = { op: "and", a: gate, b: doc.shortEntry };
+        mutation = "chop_gate";
       } else if (kind < 0.65) {
         // remove a conjunct (simplify)
         const n = doc.longEntry as unknown as AnyNode;

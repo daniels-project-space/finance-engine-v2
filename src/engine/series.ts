@@ -193,3 +193,73 @@ export function median(src: Float64Array, n: number): Float64Array {
   }
   return out;
 }
+
+// ============================================================ CHOP / REGIME PRIMITIVES
+// All strictly causal (out[i] uses only data <= i; NaN until warm) — same discipline
+// as the rest of this file. These give the DSL trend-quality / chop-detection tools.
+
+/** Kaufman EFFICIENCY RATIO over n bars, in [0,1]. = |net move| / sum(|bar moves|).
+ *  ~1 = clean trend (price went straight), ~0 = chop (lots of motion, no progress).
+ *  The canonical "is this trending or sideways" filter. Single-source (close). */
+export function effratio(src: Float64Array, n: number): Float64Array {
+  const out = new Float64Array(src.length).fill(NaN);
+  const fv = firstFinite(src);
+  for (let i = fv + n; i < src.length; i++) {
+    const net = Math.abs(src[i] - src[i - n]);
+    let vol = 0;
+    for (let j = i - n + 1; j <= i; j++) vol += Math.abs(src[j] - src[j - 1]);
+    out[i] = vol > 1e-12 ? net / vol : 0;
+  }
+  return out;
+}
+
+/** CHOPPINESS INDEX over n bars, ~0 (trending) .. 100 (choppy/sideways). Bill Williams:
+ *  100*log10( sum(TR) / (maxHigh-minLow) ) / log10(n). Needs OHLC. High = chop, sit out. */
+export function choppiness(h: Float64Array, l: Float64Array, c: Float64Array, n: number): Float64Array {
+  const out = new Float64Array(c.length).fill(NaN);
+  const tr = new Float64Array(c.length);
+  for (let i = 1; i < c.length; i++) tr[i] = Math.max(h[i] - l[i], Math.abs(h[i] - c[i - 1]), Math.abs(l[i] - c[i - 1]));
+  const logN = Math.log10(n);
+  for (let i = n; i < c.length; i++) {
+    let sumTr = 0, hh = -Infinity, ll = Infinity;
+    for (let j = i - n + 1; j <= i; j++) { sumTr += tr[j]; if (h[j] > hh) hh = h[j]; if (l[j] < ll) ll = l[j]; }
+    const range = hh - ll;
+    out[i] = range > 1e-12 && sumTr > 1e-12 ? (100 * Math.log10(sumTr / range)) / logN : 50;
+  }
+  return out;
+}
+
+/** ADX (Average Directional Index) over n bars, 0..100 — trend STRENGTH (not direction).
+ *  Wilder's: smoothed |+DI - -DI| / (+DI + -DI). ADX > ~25 = trending, < ~20 = chop.
+ *  The canonical chop filter. Needs OHLC. Causal Wilder smoothing. */
+export function adx(h: Float64Array, l: Float64Array, c: Float64Array, n: number): Float64Array {
+  const len = c.length;
+  const out = new Float64Array(len).fill(NaN);
+  if (len < 2 * n + 1) return out;
+  const tr = new Float64Array(len), pdm = new Float64Array(len), ndm = new Float64Array(len);
+  for (let i = 1; i < len; i++) {
+    const up = h[i] - h[i - 1], down = l[i - 1] - l[i];
+    pdm[i] = up > down && up > 0 ? up : 0;
+    ndm[i] = down > up && down > 0 ? down : 0;
+    tr[i] = Math.max(h[i] - l[i], Math.abs(h[i] - c[i - 1]), Math.abs(l[i] - c[i - 1]));
+  }
+  // Wilder smoothing of TR, +DM, -DM -> +DI, -DI -> DX -> ADX (smoothed DX)
+  let strSm = 0, pdmSm = 0, ndmSm = 0;
+  const dx = new Float64Array(len).fill(NaN);
+  for (let i = 1; i < len; i++) {
+    if (i <= n) { strSm += tr[i]; pdmSm += pdm[i]; ndmSm += ndm[i]; if (i < n) continue; }
+    else { strSm = strSm - strSm / n + tr[i]; pdmSm = pdmSm - pdmSm / n + pdm[i]; ndmSm = ndmSm - ndmSm / n + ndm[i]; }
+    const pdi = strSm > 1e-12 ? 100 * pdmSm / strSm : 0;
+    const ndi = strSm > 1e-12 ? 100 * ndmSm / strSm : 0;
+    const sum = pdi + ndi;
+    dx[i] = sum > 1e-12 ? 100 * Math.abs(pdi - ndi) / sum : 0;
+  }
+  // ADX = Wilder-smoothed DX starting after the first n DX values are available
+  let adxv = 0, seeded = false, seedCount = 0;
+  for (let i = n; i < len; i++) {
+    if (Number.isNaN(dx[i])) continue;
+    if (!seeded) { adxv += dx[i]; seedCount++; if (seedCount === n) { adxv /= n; out[i] = adxv; seeded = true; } }
+    else { adxv = (adxv * (n - 1) + dx[i]) / n; out[i] = adxv; }
+  }
+  return out;
+}

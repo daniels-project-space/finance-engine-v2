@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { COMPLEXITY_LIMITS, type Expr, type ParamSpec, type StrategyDoc } from "./types";
 
 const PRICE_FIELDS = new Set(["open", "high", "low", "close", "volume"]);
-const IND_OPS = new Set(["ema", "sma", "wma", "rsi", "atr", "stdev", "highest", "lowest", "lag", "zscore", "slope", "pctrank", "median", "roc"]);
+const IND_OPS = new Set(["ema", "sma", "wma", "rsi", "atr", "stdev", "highest", "lowest", "lag", "zscore", "slope", "pctrank", "median", "roc", "effratio", "adx", "choppiness", "rangepos"]);
 const BIN_OPS = new Set(["add", "sub", "mul", "div", "min2", "max2"]);
 const UN_OPS = new Set(["abs", "neg", "log", "sign", "sqrt"]);
 const CMP_OPS = new Set(["gt", "lt", "crossover", "crossunder"]);

@@ -5,7 +5,13 @@ export type PriceField = "open" | "high" | "low" | "close" | "volume";
 
 export type IndicatorOp =
   | "ema" | "sma" | "wma" | "rsi" | "atr" | "stdev" | "highest" | "lowest"
-  | "lag" | "zscore" | "slope" | "pctrank" | "median" | "roc";
+  | "lag" | "zscore" | "slope" | "pctrank" | "median" | "roc"
+  // ---- chop-protection / trend-quality (point-in-time) ----
+  | "effratio"   // Kaufman efficiency ratio 0..1 (1=clean trend, 0=chop) — single source
+  | "adx"        // ADX 0..100 trend STRENGTH (OHLC) — >25 trending, <20 chop
+  | "choppiness" // Choppiness index 0..100 (OHLC) — high=sideways, low=trending
+  | "rangepos";  // where close sits in trailing high-low range, 0..1 (single source = close)
+
 
 export type BinaryOp = "add" | "sub" | "mul" | "div" | "min2" | "max2";
 export type UnaryOp = "abs" | "neg" | "log" | "sign" | "sqrt";

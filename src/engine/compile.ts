@@ -189,7 +189,7 @@ export function evalNum(e: Expr, inp: CompiledInputs, params: Record<string, num
     case "const": { out = new Float64Array(len).fill(n.value as number); break; }
     case "param": { out = new Float64Array(len).fill(params[n.name as string]); break; }
     case "ema": case "sma": case "wma": case "rsi": case "stdev": case "highest": case "lowest":
-    case "lag": case "zscore": case "slope": case "pctrank": case "median": case "roc": {
+    case "lag": case "zscore": case "slope": case "pctrank": case "median": case "roc": case "effratio": {
       const src = evalNum(n.src as Expr, inp, params, memo);
       let p = Math.round(resolveScalar(n.period as Expr, params));
       p = Math.max(1, Math.min(COMPLEXITY_LIMITS.maxPeriod, p));
@@ -202,6 +202,22 @@ export function evalNum(e: Expr, inp: CompiledInputs, params: Record<string, num
       let p = Math.round(resolveScalar((n as { period?: Expr }).period as Expr, params));
       p = Math.max(1, Math.min(COMPLEXITY_LIMITS.maxPeriod, p));
       out = S.atr(inp.h, inp.l, inp.c, p);
+      break;
+    }
+    case "adx": case "choppiness": {
+      // trend-strength / chop indices over OHLC (period from node; src ignored)
+      let p = Math.round(resolveScalar((n as { period?: Expr }).period as Expr, params));
+      p = Math.max(2, Math.min(COMPLEXITY_LIMITS.maxPeriod, p));
+      out = n.op === "adx" ? S.adx(inp.h, inp.l, inp.c, p) : S.choppiness(inp.h, inp.l, inp.c, p);
+      break;
+    }
+    case "rangepos": {
+      // where close sits in the trailing high-low range, 0..1 (0=at lows, 1=at highs) — Wyckoff range position
+      let p = Math.round(resolveScalar((n as { period?: Expr }).period as Expr, params));
+      p = Math.max(2, Math.min(COMPLEXITY_LIMITS.maxPeriod, p));
+      const hh = S.highest(inp.h, p), ll = S.lowest(inp.l, p);
+      out = new Float64Array(len).fill(NaN);
+      for (let i = 0; i < len; i++) { const rng = hh[i] - ll[i]; if (rng > 1e-12) out[i] = (inp.c[i] - ll[i]) / rng; }
       break;
     }
     case "add": case "sub": case "mul": case "div": case "min2": case "max2": {
