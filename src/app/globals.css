@@ -118,3 +118,12 @@ table.dt tbody tr:hover { background: #ffffff06; }
 
 /* hairline divider used in place of borders where a separation is needed */
 .hr { height: 1px; background: linear-gradient(90deg, transparent, #ffffff0c 12%, #ffffff0c 88%, transparent); border: 0; }
+
+/* BLUE GLOW for Daniel's seeded / regime-aware strategies — unmistakable highlight */
+.blue-glow {
+  box-shadow: 0 0 0 1px #5cc8ff55, 0 0 18px -2px #5cc8ff66, inset 0 0 22px -10px #5cc8ff44;
+  background: linear-gradient(90deg, #5cc8ff10, transparent 60%) !important;
+}
+.blue-glow-text { color: #5cc8ff; text-shadow: 0 0 8px #5cc8ff77; }
+@keyframes bluePulse { 0%,100% { box-shadow: 0 0 0 1px #5cc8ff55, 0 0 16px -3px #5cc8ff55; } 50% { box-shadow: 0 0 0 1px #5cc8ff88, 0 0 24px -2px #5cc8ff99; } }
+.blue-glow-pulse { animation: bluePulse 2.4s ease-in-out infinite; }

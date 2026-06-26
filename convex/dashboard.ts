@@ -258,9 +258,9 @@ export const paperBook = query({
   args: {},
   handler: async (ctx) => {
     const stages = ["incubating", "eligible", "champion"];
-    const sleeves: { id: string; name: string; source: string; family: string; forwardSeed: boolean; leverage?: number; startEq: number; equity: number; peak: number; days: number; ret: number; sharpe: number | null; maxDD: number; halted: boolean; bars: number; spark: number[]; vsHodl?: { trendCagr: number; trendMaxDD: number; trendCalmar: number; hodlCagr: number; hodlMaxDD: number; hodlCalmar: number } }[] = [];
+    const sleeves: { id: string; name: string; source: string; family: string; forwardSeed: boolean; userStrategy?: boolean; lastTs?: number; leverage?: number; startEq: number; equity: number; peak: number; days: number; ret: number; sharpe: number | null; maxDD: number; halted: boolean; bars: number; spark: number[]; vsHodl?: { trendCagr: number; trendMaxDD: number; trendCalmar: number; hodlCagr: number; hodlMaxDD: number; hodlCalmar: number } }[] = [];
     const PPY = 8760; // hourly paper steps
-    const fam = (s: string) => s === "xsection" ? "Cross-sectional" : s === "ivsleeve" ? "IV-timing" : s === "onchain" ? "On-chain" : s === "trendbeta" ? "Trend-beta" : "DSL";
+    const fam = (s: string) => s === "xsection" ? "Cross-sectional" : s === "ivsleeve" ? "IV-timing" : s === "onchain" ? "On-chain" : s === "trendbeta" ? "Trend-beta" : s === "regime" ? "Regime / chop" : "DSL";
     // collect all snapshots keyed by timestamp for the combined book curve
     const perTsRet = new Map<number, { sum: number; n: number }>();
 
@@ -280,7 +280,10 @@ export const paperBook = query({
         const m = parseMetrics(c.metrics);
         const startedAt = c.incubationStartedAt ?? acct.startedAt ?? Date.now();
         sleeves.push({
-          id: c._id, name: c.name, source: c.source, family: fam(c.source), forwardSeed: m.forwardPaper === 1 || m.forwardPaperSeed === 1, leverage: m.leverage ?? (m.aggressive ? 1.5 : undefined),
+          id: c._id, name: c.name, source: c.source, family: fam(c.source), forwardSeed: m.forwardPaper === 1 || m.forwardPaperSeed === 1,
+          userStrategy: m.userStrategy === 1 || c.source === "regime",
+          lastTs: snaps.length ? snaps[snaps.length - 1]._creationTime : undefined,
+          leverage: m.leverage ?? (m.aggressive ? 1.5 : undefined),
           startEq: 10000, equity: acct.equity, peak: acct.peakEquity ?? peak,
           days: (Date.now() - startedAt) / 86400_000, ret: (acct.equity / (10000)) - 1,
           sharpe, maxDD, halted: !!acct.halted, bars: rets.length,
@@ -316,7 +319,7 @@ export const paperBook = query({
     return {
       nSleeves: sleeves.length,
       days,
-      book: { t: bookT, eq: bookEq, sharpe: bookSharpe, ret: bookEq.length ? bookEq[bookEq.length - 1] - 1 : 0, maxDD: bookDD, bars: bookRets.length },
+      book: { t: bookT, eq: bookEq, sharpe: bookSharpe, ret: bookEq.length ? bookEq[bookEq.length - 1] - 1 : 0, maxDD: bookDD, bars: bookRets.length, lastTs: sleeves.reduce((mx, s) => Math.max(mx, s.lastTs ?? 0), 0) },
       sleeves,
     };
   },

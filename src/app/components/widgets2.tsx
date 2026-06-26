@@ -103,7 +103,7 @@ export function BookGauge({ deflated, target, raw }: { deflated: number; target:
 const SRC: Record<string, string> = {
   seed: "#5cc8ff", imported: "#c191fb", llm: "#f5b932", gp: "#8b9aab",
   mutation: "#3ddb9e", crossover: "#5cc8ff", repair: "#f08a3c",
-  xsection: "#c191fb", ivsleeve: "#5cc8ff", onchain: "#3ddb9e",
+  xsection: "#c191fb", ivsleeve: "#5cc8ff", onchain: "#3ddb9e", regime: "#5cc8ff", trendbeta: "#f5b932",
 };
 export function srcColor(s: string): string { return SRC[s] ?? "#5e6c7a"; }
 
@@ -304,8 +304,9 @@ export function Progression({ points, target = 1.04, height = 280 }: { points: P
 // The live forward track record (the moving headline). Big forward equity / Sharpe
 // / days, the combined book equity curve, and per-sleeve forward rows. HONEST:
 // "warming" until enough forward bars exist; framed as modest sleeves being tested.
-export interface PaperSleeve { id: string; name: string; family: string; forwardSeed: boolean; leverage?: number; equity: number; ret: number; sharpe: number | null; days: number; maxDD: number; halted: boolean; bars: number; spark: number[] }
-export interface PaperData { nSleeves: number; days: number; book: { t: number[]; eq: number[]; sharpe: number | null; ret: number; maxDD: number; bars: number }; sleeves: PaperSleeve[] }
+export interface PaperSleeve { id: string; name: string; family: string; source?: string; userStrategy?: boolean; lastTs?: number; forwardSeed: boolean; leverage?: number; equity: number; ret: number; sharpe: number | null; days: number; maxDD: number; halted: boolean; bars: number; spark: number[] }
+export interface PaperData { nSleeves: number; days: number; book: { t: number[]; eq: number[]; sharpe: number | null; ret: number; maxDD: number; bars: number; lastTs?: number }; sleeves: PaperSleeve[] }
+function liveAgo(ts?: number): string { if (!ts) return "—"; const s = (Date.now() - ts) / 1000; return s < 90 ? Math.round(s) + "s ago" : s < 5400 ? Math.round(s / 60) + "m ago" : s < 172800 ? Math.round(s / 3600) + "h ago" : Math.round(s / 86400) + "d ago"; }
 
 export function PaperBook({ data }: { data: PaperData }) {
   if (data.nSleeves === 0) {
@@ -318,6 +319,11 @@ export function PaperBook({ data }: { data: PaperData }) {
     <div className="grid lg:grid-cols-[1fr_1.1fr] gap-7">
       {/* left: the big forward numbers */}
       <div>
+        <div className="flex items-center gap-2 mb-2">
+          <span className="w-2 h-2 rounded-full bg-info live-dot" />
+          <span className="num text-[10px] blue-glow-text tracking-wider">LIVE</span>
+          <span className="num text-[10px] text-dim">updated {liveAgo(data.book.lastTs)} · steps hourly</span>
+        </div>
         <div className="flex items-end gap-4 mb-1">
           <div className={`num leading-none ${bookRet >= 0 ? "text-up" : "text-down"}`} style={{ fontSize: 52 }}>{bookRet >= 0 ? "+" : ""}{(bookRet * 100).toFixed(2)}%</div>
           <div className="num text-dim text-sm mb-2">forward P&amp;L</div>
@@ -345,8 +351,11 @@ export function PaperBook({ data }: { data: PaperData }) {
       </div>
       {/* right: the combined book equity curve */}
       <div className="min-w-0">
-        <div className="hud mb-2">Combined paper-book equity (equal-weight, forward)</div>
-        {curve ? <Chart height={180} yLabel="growth of $1" series={[{ name: "paper book", color: bookRet >= 0 ? "#3ddb9e" : "#fb6f5d", curve }]} /> : (
+        <div className="flex items-center justify-between mb-2">
+          <span className="hud">Live forward equity — extends each hour</span>
+          <span className="num text-[9px] blue-glow-text">● LIVE {liveAgo(data.book.lastTs)}</span>
+        </div>
+        {curve ? <Chart height={210} yLabel="growth of $1" series={[{ name: "paper book (forward)", color: bookRet >= 0 ? "#3ddb9e" : "#fb6f5d", curve }]} /> : (
           <div className="well flex items-center justify-center" style={{ height: 180 }}><span className="hud">{data.book.bars === 0 ? "positions set — P&L accrues from next bar" : "accumulating forward bars…"}</span></div>
         )}
       </div>
@@ -359,9 +368,10 @@ export function PaperBook({ data }: { data: PaperData }) {
             <thead><tr><th>sleeve</th><th>family</th><th>fwd P&amp;L</th><th>fwd Sharpe</th><th>fwd maxDD</th><th>days</th><th>equity</th><th>status</th></tr></thead>
             <tbody>
               {data.sleeves.map((s) => (
-                <tr key={s.id}>
+                <tr key={s.id} className={s.userStrategy || s.source === "regime" ? "blue-glow" : ""}>
                   <td style={{ textAlign: "left" }}>
-                    <Link href={`/candidates/${s.id}`} className="text-mid hover:text-up">{s.name}</Link>
+                    <Link href={`/candidates/${s.id}`} className={s.userStrategy || s.source === "regime" ? "blue-glow-text hover:underline" : "text-mid hover:text-up"}>{s.name}</Link>
+                    {(s.userStrategy || s.source === "regime") && <span className="num text-[8px] ml-2 px-1.5 py-0.5 rounded blue-glow-text" style={{ background: "#5cc8ff18" }}>★ regime-aware</span>}
                     {s.leverage && s.leverage > 1 ? <span className="pill text-down ml-2">{s.leverage}x aggressive</span> : null}
                   </td>
                   <td style={{ textAlign: "left" }} className="num text-[10px] text-dim">{s.family}</td>
