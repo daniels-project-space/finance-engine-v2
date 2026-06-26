@@ -3,7 +3,7 @@
 import { useQuery } from "convex/react";
 import Link from "next/link";
 import { api } from "../../convex/_generated/api";
-import { ChartWithBenchmarks, Lead, Info, Spark, pct, curveStats, type Curve } from "./components/ds";
+import { ChartWithBenchmarks, Lead, Info, Spark, pct, curveStats, useLiveBench, type Curve } from "./components/ds";
 
 // ================================================================ LIVE (home)
 // "How are my strategies doing right now?" The live paper-trading terminal: one
@@ -19,6 +19,7 @@ function liveAgo(ts?: number): string {
 
 export default function LivePage() {
   const paper = useQuery(api.dashboard.paperBook, {});
+  const liveBench = useLiveBench(); // hourly BTC + SOL so the short live window has a real overlay
 
   if (!paper) return <div className="hud py-20 text-center">loading…</div>;
   if (paper.nSleeves === 0) {
@@ -37,6 +38,11 @@ export default function LivePage() {
   const trading = paper.nSleeves - inCash;
   const flatBook = Math.abs(bookRet) < 0.002;
   void cs;
+  // Daniel's strategy: its backtest headline vs its live-so-far (the distinction)
+  const mine = paper.sleeves.filter((s) => s.userStrategy);
+  const sol = mine.find((s) => /sol/i.test(s.name));
+  const myStar = sol ?? mine[0];
+  const myBacktest = myStar?.backtestTotal;
 
   return (
     <div className="space-y-7 stagger pb-14">
@@ -47,6 +53,16 @@ export default function LivePage() {
           ? <>Right now most are <span className="text-fg">sitting in cash</span>, waiting for an uptrend — so the line is flat. That&apos;s the safety filter working, not a frozen screen.</>
           : <>They&apos;re up <span className={bookRet >= 0 ? "text-up" : "text-down"}>{(bookRet * 100).toFixed(2)}%</span> so far.</>}
       </Lead>
+
+      {/* ============ backtest-vs-live explainer (why ~0% while "200% strategy") ============ */}
+      {myStar && myBacktest != null && (
+        <div className="rounded-xl bg-[#5cc8ff0a] border border-[#5cc8ff22] px-5 py-4">
+          <div className="num text-[13px] text-mid leading-relaxed">
+            Your {sol ? "SOL" : "BTC"} strategy made <span className="text-up">+{(myBacktest * 100).toFixed(0)}% in backtesting</span> (on past data — see the <Link href="/strategies" className="blue-glow-text hover:underline">Strategies tab</Link>).
+            Live testing just started, and it&apos;s currently <span className="text-fg">{Math.abs(myStar.ret) < 0.0005 ? "in cash, waiting for an uptrend" : `${myStar.ret >= 0 ? "up" : "down"} ${(myStar.ret * 100).toFixed(2)}%`}</span> — so live profit is <span className="num">~{(myStar.ret * 100).toFixed(1)}%</span> until it places its first trade. <span className="text-dim">Backtest ≠ live; the live record is what proves it forward.</span>
+          </div>
+        </div>
+      )}
 
       {/* ============ THE BIG NUMBER + BIG MOVING CHART ============ */}
       <section className="grid lg:grid-cols-[0.8fr_1.5fr] gap-6 items-stretch">
@@ -80,6 +96,9 @@ export default function LivePage() {
               stratLabel="your strategies"
               ppy={8760}
               showMetrics
+              benchmarks={{ spx: null, btc: null }}
+              extra={liveBench.btc ? [{ label: "BTC (live)", color: "#f5b932", raw: liveBench.btc, primary: true }] : []}
+              benchNote="Holding BTC over the same live hours (hourly price). S&P 500 is daily — it appears here once the live record spans a market day or two."
               series={[{ name: "your strategies", color: bookRet >= 0 ? "#3ddb9e" : "#fb6f5d", curve }]}
             />
           ) : (
@@ -109,9 +128,15 @@ export default function LivePage() {
                     {s.halted ? "stopped" : flat ? "in cash" : "trading"}
                   </span>
                 </div>
-                <div className={`num text-[32px] leading-none ${s.ret >= 0 ? "text-up" : "text-down"}`}>
-                  {s.ret >= 0 ? "+" : ""}{(s.ret * 100).toFixed(2)}%
+                <div className="flex items-baseline gap-2">
+                  <span className="hud">live so far</span>
+                  <span className={`num text-[28px] leading-none ${s.ret >= 0 ? "text-up" : "text-down"}`}>
+                    {s.ret >= 0 ? "+" : ""}{(s.ret * 100).toFixed(2)}%
+                  </span>
                 </div>
+                {glow && s.backtestTotal != null && (
+                  <div className="num text-[10px] text-dim mt-1.5">backtest <span className="text-up">+{(s.backtestTotal * 100).toFixed(0)}%</span> on past data{flat ? " · in cash now" : ""}</div>
+                )}
                 <div className="mt-4 h-[28px]">
                   {s.spark.length > 1 ? <Spark values={s.spark} width={240} height={28} tone={s.ret >= 0 ? "up" : "down"} fill /> : <span className="hud">—</span>}
                 </div>

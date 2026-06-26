@@ -314,14 +314,14 @@ export function curveStats(c?: Curve | null, ppy = 252): CurveStats {
   return { total, maxDD, sharpe, winRate: rets.length ? wins / rets.length : null, calmar: maxDD < 0 ? cagr / Math.abs(maxDD) : null };
 }
 
-// three-way comparison strip: strategy vs SPX vs BTC, side by side.
-export function ThreeWayMetrics({ strat, spx, btc, stratLabel = "Strategy", ppy = 252 }: {
-  strat?: Curve | null; spx?: Curve | null; btc?: Curve | null; stratLabel?: string; ppy?: number;
+// three-way comparison strip: strategy vs SPX vs (BTC or SOL) HODL, side by side.
+export function ThreeWayMetrics({ strat, spx, btc, stratLabel = "Strategy", btcLabel = "BTC HODL", btcColor = "#f5b932", ppy = 252 }: {
+  strat?: Curve | null; spx?: Curve | null; btc?: Curve | null; stratLabel?: string; btcLabel?: string; btcColor?: string; ppy?: number;
 }) {
   const cols: { label: string; color: string; s: CurveStats }[] = [];
   if (strat) cols.push({ label: stratLabel, color: "#3ddb9e", s: curveStats(strat, ppy) });
   if (spx) cols.push({ label: "S&P 500", color: "#8b9aab", s: curveStats(spx, ppy) });
-  if (btc) cols.push({ label: "BTC HODL", color: "#f5b932", s: curveStats(btc, ppy) });
+  if (btc) cols.push({ label: btcLabel, color: btcColor, s: curveStats(btc, ppy) });
   if (!cols.length) return null;
   const rows: { k: string; f: (s: CurveStats) => string; tone?: (s: CurveStats) => string }[] = [
     { k: "Total return", f: (s) => `${s.total >= 0 ? "+" : ""}${(s.total * 100).toFixed(0)}%`, tone: (s) => s.total >= 0 ? "text-up" : "text-down" },
@@ -360,6 +360,21 @@ export function ThreeWayMetrics({ strat, spx, btc, stratLabel = "Strategy", ppy 
 let _bench: Benchmarks | null = null;       // module-level cache so all charts share one fetch
 export function setBenchmarks(b: Benchmarks | null) { _bench = b; }
 
+// Fetch recent HOURLY BTC + SOL closes (from /api/livebench → OKX public) so the
+// Live chart — whose window is only hours/days — can overlay a real benchmark line
+// the sparse daily series can't draw. Read-only; refetches every 5 min.
+export function useLiveBench(): { btc: { t: number[]; c: number[] } | null; sol: { t: number[]; c: number[] } | null } {
+  const [d, setD] = useState<{ btc: { t: number[]; c: number[] } | null; sol: { t: number[]; c: number[] } | null }>({ btc: null, sol: null });
+  useEffect(() => {
+    let alive = true;
+    const load = () => fetch("/api/livebench").then((r) => r.json()).then((j) => { if (alive) setD({ btc: j.btc ?? null, sol: j.sol ?? null }); }).catch(() => { /* */ });
+    load();
+    const id = setInterval(load, 5 * 60_000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+  return d;
+}
+
 function useBenchToggle(storeKey: string, dflt: boolean): [boolean, () => void] {
   const [on, setOn] = useState(dflt);
   useEffect(() => {
@@ -369,12 +384,17 @@ function useBenchToggle(storeKey: string, dflt: boolean): [boolean, () => void] 
   return [on, toggle];
 }
 
+// an EXTRA benchmark (e.g. SOL HODL on a SOL strategy, or hourly BTC on Live) that
+// always overlays in addition to the global SPX/BTC. Given as a raw {t,c} price
+// series + label/color; rebased to the chart window like the others.
+export interface ExtraBench { label: string; color: string; raw: { t: number[]; c: number[] } | null | undefined; primary?: boolean }
+
 export function ChartWithBenchmarks({
-  series, benchmarks, height = 220, yLabel = "growth of $1", showArea = true, showMetrics = false,
-  storeKey = "default", stratLabel, ppy = 252, defaultOn = true,
+  series, benchmarks, extra, height = 220, yLabel = "growth of $1", showArea = true, showMetrics = false,
+  storeKey = "default", stratLabel, ppy = 252, defaultOn = true, benchNote,
 }: {
-  series: Series[]; benchmarks?: Benchmarks | null; height?: number; yLabel?: string; showArea?: boolean;
-  showMetrics?: boolean; storeKey?: string; stratLabel?: string; ppy?: number; defaultOn?: boolean;
+  series: Series[]; benchmarks?: Benchmarks | null; extra?: ExtraBench[]; height?: number; yLabel?: string; showArea?: boolean;
+  showMetrics?: boolean; storeKey?: string; stratLabel?: string; ppy?: number; defaultOn?: boolean; benchNote?: ReactNode;
 }) {
   const [on, toggle] = useBenchToggle(storeKey, defaultOn);
   const bench = benchmarks ?? _bench;
@@ -384,27 +404,39 @@ export function ChartWithBenchmarks({
   const t1 = prim?.curve.t?.[(prim?.curve.t.length ?? 1) - 1] ?? 0;
   const spx = on ? rebaseBench(bench?.spx, t0, t1) : undefined;
   const btc = on ? rebaseBench(bench?.btc, t0, t1) : undefined;
+  // extra benchmarks rebased to the same window
+  const extraCurves = (extra ?? []).map((e) => ({ ...e, curve: on ? rebaseBench(e.raw, t0, t1) : undefined }));
   const overlay: Series[] = [
     ...series,
+    ...extraCurves.filter((e) => e.curve).map((e) => ({ name: e.label, color: e.color, curve: e.curve!, dash: true } as Series)),
     ...(spx ? [{ name: "S&P 500", color: "#8b9aab", curve: spx, dash: true } as Series] : []),
     ...(btc ? [{ name: "BTC HODL", color: "#f5b932", curve: btc, dash: true } as Series] : []),
   ];
-  const hasBench = !!(bench?.spx || bench?.btc);
+  const hasBench = !!(bench?.spx || bench?.btc || (extra && extra.length));
+  // a primary extra benchmark (e.g. SOL HODL) takes the "BTC HODL" slot in the metrics strip
+  const primaryExtra = extraCurves.find((e) => e.primary && e.curve);
   return (
     <div>
       {hasBench && (
         <div className="flex items-center justify-end mb-1.5">
-          <button onClick={toggle} title="toggle S&P 500 + BTC buy-and-hold reference overlays"
+          <button onClick={toggle} title="toggle the buy-and-hold reference overlays"
             className={`num text-[9px] px-2 py-0.5 rounded-md border transition-colors ${on ? "text-mid border-edge bg-[#ffffff06]" : "text-dim border-edge/50 hover:text-mid"}`}>
             <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1.5 align-middle ${on ? "bg-info" : "bg-faint"}`} />
-            vs S&amp;P / BTC {on ? "on" : "off"}
+            vs {(extra ?? []).filter((e) => e.primary).map((e) => e.label.replace(" HODL", "")).join("/") || "S&P / BTC"}{(extra ?? []).some((e) => e.primary) ? " / BTC" : ""} {on ? "on" : "off"}
           </button>
         </div>
       )}
       <Chart series={overlay} height={height} yLabel={yLabel} showArea={showArea} />
+      {on && benchNote && <div className="num text-[9px] text-dim mt-1.5">{benchNote}</div>}
       {showMetrics && (
         <div className="mt-3">
-          <ThreeWayMetrics strat={prim?.curve} spx={on ? spx : undefined} btc={on ? btc : undefined} stratLabel={stratLabel ?? prim?.name} ppy={ppy} />
+          <ThreeWayMetrics
+            strat={prim?.curve}
+            spx={on ? spx : undefined}
+            btc={on ? (primaryExtra?.curve ?? btc) : undefined}
+            btcLabel={primaryExtra?.label ?? "BTC HODL"}
+            btcColor={primaryExtra?.color}
+            stratLabel={stratLabel ?? prim?.name} ppy={ppy} />
         </div>
       )}
     </div>

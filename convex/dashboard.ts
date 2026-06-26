@@ -258,7 +258,7 @@ export const paperBook = query({
   args: {},
   handler: async (ctx) => {
     const stages = ["incubating", "eligible", "champion"];
-    const sleeves: { id: string; name: string; source: string; family: string; forwardSeed: boolean; userStrategy?: boolean; lastTs?: number; leverage?: number; startEq: number; equity: number; peak: number; days: number; ret: number; sharpe: number | null; maxDD: number; halted: boolean; bars: number; spark: number[]; vsHodl?: { trendCagr: number; trendMaxDD: number; trendCalmar: number; hodlCagr: number; hodlMaxDD: number; hodlCalmar: number } }[] = [];
+    const sleeves: { id: string; name: string; source: string; family: string; forwardSeed: boolean; userStrategy?: boolean; lastTs?: number; leverage?: number; startEq: number; equity: number; peak: number; days: number; ret: number; sharpe: number | null; maxDD: number; halted: boolean; bars: number; spark: number[]; backtestTotal?: number; backtestHodlTotal?: number; vsHodl?: { trendCagr: number; trendMaxDD: number; trendCalmar: number; hodlCagr: number; hodlMaxDD: number; hodlCalmar: number } }[] = [];
     const PPY = 8760; // hourly paper steps
     const fam = (s: string) => s === "xsection" ? "Cross-sectional" : s === "ivsleeve" ? "IV-timing" : s === "onchain" ? "On-chain" : s === "trendbeta" ? "Trend-beta" : s === "regime" ? "Regime / chop" : "DSL";
     // collect all snapshots keyed by timestamp for the combined book curve
@@ -288,6 +288,10 @@ export const paperBook = query({
           days: (Date.now() - startedAt) / 86400_000, ret: (acct.equity / (10000)) - 1,
           sharpe, maxDD, halted: !!acct.halted, bars: rets.length,
           spark: eqs.slice(-60),
+          // the seeded BACKTEST headline (e.g. Daniel's +183% vs BTC +41%) so the
+          // live card can show "backtest +X% / live so far Y%" — the distinction.
+          backtestTotal: m.fullTotal,
+          backtestHodlTotal: m.hodlTotal,
           // backtest vs-HODL stats (trend-beta sleeves carry these) — the "safer than HODL" story
           vsHodl: m.hodlMaxDD !== undefined ? { trendCagr: m.trendCagr ?? 0, trendMaxDD: m.trendMaxDD ?? 0, trendCalmar: m.trendCalmar ?? 0, hodlCagr: m.hodlCagr ?? 0, hodlMaxDD: m.hodlMaxDD ?? 0, hodlCalmar: m.hodlCalmar ?? 0 } : undefined,
         });
@@ -338,6 +342,23 @@ export const benchmarks = query({
     const btc = await ctx.db.query("config").withIndex("by_key", (q) => q.eq("key", "benchmark_btc")).first();
     const parse = (s?: string) => { if (!s) return null; try { return JSON.parse(s) as { t: number[]; c: number[] }; } catch { return null; } };
     return { spx: parse(spx?.json), btc: parse(btc?.json) };
+  },
+});
+
+/**
+ * USER STRATEGIES — Daniel's hand-built regime strategies (source "regime" /
+ * userStrategy), returned EXPLICITLY regardless of composite rank so the SOL hero
+ * is never buried below the by-composite cutoff. Read-only; returns full rows
+ * (dsl/metrics/curves) for the Strategies-tab hero.
+ */
+export const userStrategies = query({
+  args: {},
+  handler: async (ctx) => {
+    // regime sleeves live in incubating (forward-paper); scan that small set + a
+    // recent window for any others. No look-ahead — read-only.
+    const inc = await ctx.db.query("candidates").withIndex("by_stage", (q) => q.eq("stage", "incubating")).collect();
+    const rows = inc.filter((r) => r.source === "regime" || (() => { try { return JSON.parse(r.metrics ?? "{}").userStrategy === 1; } catch { return false; } })());
+    return rows.map((r) => ({ _id: r._id, name: r.name, stage: r.stage, source: r.source, composite: r.composite, failedStage: r.failedStage, metrics: r.metrics, curves: r.curves }));
   },
 });
 
