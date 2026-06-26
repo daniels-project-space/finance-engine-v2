@@ -40,9 +40,10 @@ export default function LivePage() {
   void cs;
   // Daniel's strategy: its backtest headline vs its live-so-far (the distinction)
   const mine = paper.sleeves.filter((s) => s.userStrategy);
-  const sol = mine.find((s) => /sol/i.test(s.name));
-  const myStar = sol ?? mine[0];
+  const flagship = mine.find((s) => s.flagship);
+  const myStar = flagship ?? mine.find((s) => /sol/i.test(s.name)) ?? mine[0];
   const myBacktest = myStar?.backtestTotal;
+  const starName = flagship ? "4-coin flagship" : /sol/i.test(myStar?.name ?? "") ? "SOL" : "BTC";
 
   return (
     <div className="space-y-7 stagger pb-14">
@@ -54,12 +55,12 @@ export default function LivePage() {
           : <>They&apos;re up <span className={bookRet >= 0 ? "text-up" : "text-down"}>{(bookRet * 100).toFixed(2)}%</span> so far.</>}
       </Lead>
 
-      {/* ============ backtest-vs-live explainer (why ~0% while "200% strategy") ============ */}
+      {/* ============ backtest-vs-live explainer (why ~0% while "+179% strategy") ============ */}
       {myStar && myBacktest != null && (
         <div className="rounded-xl bg-[#5cc8ff0a] border border-[#5cc8ff22] px-5 py-4">
           <div className="num text-[13px] text-mid leading-relaxed">
-            Your {sol ? "SOL" : "BTC"} strategy made <span className="text-up">+{(myBacktest * 100).toFixed(0)}% in backtesting</span> (on past data — see the <Link href="/strategies" className="blue-glow-text hover:underline">Strategies tab</Link>).
-            Live testing just started, and it&apos;s currently <span className="text-fg">{Math.abs(myStar.ret) < 0.0005 ? "in cash, waiting for an uptrend" : `${myStar.ret >= 0 ? "up" : "down"} ${(myStar.ret * 100).toFixed(2)}%`}</span> — so live profit is <span className="num">~{(myStar.ret * 100).toFixed(1)}%</span> until it places its first trade. <span className="text-dim">Backtest ≠ live; the live record is what proves it forward.</span>
+            Your {starName} strategy made <span className="text-up">+{(myBacktest * 100).toFixed(0)}% in backtesting</span> (on past data — see the <Link href="/strategies" className="blue-glow-text hover:underline">Strategies tab</Link>).
+            Live testing just started, and it&apos;s currently <span className="text-fg">{Math.abs(myStar.ret) < 0.0005 ? "in cash, waiting for an uptrend" : `${myStar.ret >= 0 ? "up" : "down"} ${(myStar.ret * 100).toFixed(2)}%`}</span> — so live profit is <span className="num">~{(myStar.ret * 100).toFixed(1)}%</span> until it places its first trade. <span className="text-dim">Backtest ≠ live; forward drawdown also runs deeper than backtest. The live record is what proves it forward.</span>
           </div>
         </div>
       )}
@@ -109,23 +110,24 @@ export default function LivePage() {
         </div>
       </section>
 
-      {/* ============ PER-STRATEGY CARDS ============ */}
+      {/* ============ PER-STRATEGY CARDS (flagship first) ============ */}
       <div>
         <div className="hud mb-3">Each strategy right now</div>
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {paper.sleeves.map((s) => {
+          {[...paper.sleeves].sort((a, b) => (Number(b.flagship) - Number(a.flagship)) || (Number(b.userStrategy) - Number(a.userStrategy))).map((s) => {
             const glow = s.userStrategy || s.source === "regime";
             const flat = Math.abs(s.ret) < 0.0005;
+            const longLegs = (s.legs ?? []).filter((l) => l.long).length;
             return (
               <Link key={s.id} href={`/candidates/${s.id}`}
-                className={`panel panel-h p-5 block ${glow ? "blue-glow" : ""}`}>
+                className={`panel panel-h p-5 block ${glow ? "blue-glow" : ""} ${s.flagship ? "sm:col-span-2 lg:col-span-1" : ""}`}>
                 <div className="flex items-start justify-between gap-2 mb-3">
                   <div className="min-w-0">
                     <div className={`num text-[12px] truncate ${glow ? "blue-glow-text" : "text-mid"}`}>{s.name}</div>
-                    {glow && <div className="num text-[9px] blue-glow-text mt-0.5">★ your strategy</div>}
+                    {s.flagship ? <div className="num text-[9px] blue-glow-text mt-0.5">★ your flagship · 4 coins · {s.leverage ?? 1.45}×</div> : glow ? <div className="num text-[9px] blue-glow-text mt-0.5">★ your strategy</div> : null}
                   </div>
                   <span className={`num text-[9px] px-2 py-0.5 rounded shrink-0 ${s.halted ? "text-down bg-[#fb6f5d18]" : flat ? "text-dim bg-[#ffffff08]" : "text-up bg-[#3ddb9e18]"}`}>
-                    {s.halted ? "stopped" : flat ? "in cash" : "trading"}
+                    {s.halted ? "stopped" : s.flagship ? `${longLegs}/${(s.legs ?? []).length} long` : flat ? "in cash" : "trading"}
                   </span>
                 </div>
                 <div className="flex items-baseline gap-2">
@@ -136,6 +138,14 @@ export default function LivePage() {
                 </div>
                 {glow && s.backtestTotal != null && (
                   <div className="num text-[10px] text-dim mt-1.5">backtest <span className="text-up">+{(s.backtestTotal * 100).toFixed(0)}%</span> on past data{flat ? " · in cash now" : ""}</div>
+                )}
+                {/* flagship: per-coin long/flat legs */}
+                {s.flagship && s.legs && s.legs.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 mt-2.5">
+                    {s.legs.map((l) => (
+                      <span key={l.symbol} className={`num text-[9px] px-1.5 py-0.5 rounded ${l.long ? "text-up bg-[#3ddb9e14]" : "text-dim bg-[#ffffff08]"}`}>{l.symbol} {l.long ? "long" : "cash"}</span>
+                    ))}
+                  </div>
                 )}
                 <div className="mt-4 h-[28px]">
                   {s.spark.length > 1 ? <Spark values={s.spark} width={240} height={28} tone={s.ret >= 0 ? "up" : "down"} fill /> : <span className="hud">—</span>}

@@ -258,7 +258,7 @@ export const paperBook = query({
   args: {},
   handler: async (ctx) => {
     const stages = ["incubating", "eligible", "champion"];
-    const sleeves: { id: string; name: string; source: string; family: string; forwardSeed: boolean; userStrategy?: boolean; lastTs?: number; leverage?: number; startEq: number; equity: number; peak: number; days: number; ret: number; sharpe: number | null; maxDD: number; halted: boolean; bars: number; spark: number[]; backtestTotal?: number; backtestHodlTotal?: number; vsHodl?: { trendCagr: number; trendMaxDD: number; trendCalmar: number; hodlCagr: number; hodlMaxDD: number; hodlCalmar: number } }[] = [];
+    const sleeves: { id: string; name: string; source: string; family: string; forwardSeed: boolean; userStrategy?: boolean; flagship?: boolean; lastTs?: number; leverage?: number; legs?: { symbol: string; long: boolean }[]; startEq: number; equity: number; peak: number; days: number; ret: number; sharpe: number | null; maxDD: number; halted: boolean; bars: number; spark: number[]; backtestTotal?: number; backtestHodlTotal?: number; vsHodl?: { trendCagr: number; trendMaxDD: number; trendCalmar: number; hodlCagr: number; hodlMaxDD: number; hodlCalmar: number } }[] = [];
     const PPY = 8760; // hourly paper steps
     const fam = (s: string) => s === "xsection" ? "Cross-sectional" : s === "ivsleeve" ? "IV-timing" : s === "onchain" ? "On-chain" : s === "trendbeta" ? "Trend-beta" : s === "regime" ? "Regime / chop" : "DSL";
     // collect all snapshots keyed by timestamp for the combined book curve
@@ -279,9 +279,16 @@ export const paperBook = query({
         for (const e of eqs) { peak = Math.max(peak, e); maxDD = Math.min(maxDD, peak > 0 ? e / peak - 1 : 0); }
         const m = parseMetrics(c.metrics);
         const startedAt = c.incubationStartedAt ?? acct.startedAt ?? Date.now();
+        // CORE-4 flagship: surface its per-coin long/flat legs for the live card.
+        let legs: { symbol: string; long: boolean }[] | undefined;
+        const isFlagship = m.flagship === 1;
+        if (isFlagship) {
+          const pos = await ctx.db.query("paperPositions").withIndex("by_candidate", (q) => q.eq("candidateId", c._id)).collect();
+          if (pos.length) legs = pos.map((p) => ({ symbol: p.symbol.split("/")[0], long: Math.abs(p.weight) > 1e-6 }));
+        }
         sleeves.push({
-          id: c._id, name: c.name, source: c.source, family: fam(c.source), forwardSeed: m.forwardPaper === 1 || m.forwardPaperSeed === 1,
-          userStrategy: m.userStrategy === 1 || c.source === "regime",
+          id: c._id, name: c.name, source: c.source, family: isFlagship ? "CORE-4 portfolio" : fam(c.source), forwardSeed: m.forwardPaper === 1 || m.forwardPaperSeed === 1,
+          userStrategy: m.userStrategy === 1 || c.source === "regime", flagship: isFlagship, legs,
           lastTs: snaps.length ? snaps[snaps.length - 1]._creationTime : undefined,
           leverage: m.leverage ?? (m.aggressive ? 1.5 : undefined),
           startEq: 10000, equity: acct.equity, peak: acct.peakEquity ?? peak,

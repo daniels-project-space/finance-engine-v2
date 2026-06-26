@@ -143,6 +143,106 @@ async function trendForwardStep(
   return { stepTs: S.t[i], portRet, newPositions, trades };
 }
 
+// ============================================================ CORE-4 PORTFOLIO
+// The FLAGSHIP multi-coin sleeve: BTC+ETH+SOL+BNB, each running Daniel's chop-gated
+// trend, equal-weight, whole book levered `leverage` (1.45x). Each step we compute
+// every coin's chop-trend target weight point-in-time (reusing targetWeight), size
+// it 1/N of the book, scale the book by leverage, and combine into ONE book P&L.
+// Per-coin positions tracked for status; honest funding + 1.45x liquidation distance.
+interface Core4Doc {
+  name: string; kind: "core4"; tf?: string;
+  coins: { symbol: string; smaWin: number; chopThr: number }[];
+  leverage: number; risk: StrategyDoc["risk"];
+}
+function isCore4(d: unknown): d is Core4Doc {
+  return !!d && typeof d === "object" && (d as { kind?: string }).kind === "core4" && Array.isArray((d as Core4Doc).coins);
+}
+// per-coin chop-trend DSL (Daniel's mechanism) with that coin's WF-picked params
+function chopTrendDoc(smaWin: number, chopThr: number, risk: StrategyDoc["risk"]): StrategyDoc {
+  const close = { op: "price", field: "close" };
+  const sma = { op: "sma", src: close, period: { op: "const", value: smaWin } };
+  return {
+    name: `chop_sma${smaWin}_c${chopThr}`, tf: "1d", hypothesis: "chop-gated trend",
+    longEntry: { op: "and", a: { op: "gt", a: close, b: sma }, b: { op: "lt", a: { op: "choppiness", src: close, period: { op: "const", value: 14 } }, b: { op: "const", value: chopThr } } },
+    longExit: { op: "lt", a: close, b: sma },
+    params: {}, risk,
+  } as unknown as StrategyDoc;
+}
+
+async function core4ForwardStep(
+  doc: Core4Doc, equity: number, prevPositions: Map<string, { weight: number; entryPrice?: number }>,
+  lastStepTs: number | undefined, getBars: (s: string, tf: string) => Promise<Bars | null>,
+): Promise<ForwardStep | null> {
+  const N = doc.coins.length || 1;
+  const lev = doc.leverage ?? 1.45;
+  const MAINT = 0.005;
+  let stepTs = 0, portRet = 0;
+  const trades: ForwardStep["trades"] = [];
+  const newPositions: ForwardStep["newPositions"] = [];
+
+  for (const coin of doc.coins) {
+    const bars = await getBars(coin.symbol, "1d");
+    if (!bars) { // keep prior position if data missing this step
+      const prev = prevPositions.get(coin.symbol);
+      newPositions.push({ symbol: coin.symbol, weight: prev?.weight ?? 0, entryPrice: prev?.entryPrice });
+      continue;
+    }
+    const cur = prevPositions.get(coin.symbol);
+    const prevWeight = cur?.weight ?? 0;       // already includes the 1/N * leverage sizing? NO — store the COIN weight (0..1), apply N/lev at book level
+    const prevPrice = cur?.entryPrice ?? 0;
+    const prevDir = Math.sign(prevWeight);
+    const cdoc = chopTrendDoc(coin.smaWin, coin.chopThr, doc.risk);
+    // targetWeight gives the per-coin vol-targeted long-flat weight (0..1), point-in-time
+    const t = targetWeight(cdoc, {}, bars, prevDir, prevPrice);
+    stepTs = Math.max(stepTs, t.lastTs);
+    const slip = (SLIP_BPS[coin.symbol] ?? 4) / 10_000;
+
+    // effective book contribution of this coin = (1/N) * leverage * coinWeight
+    const bookFrac = (1 / N) * lev;
+    // mark-to-market on the bar just closed: this coin's prior contribution
+    if (prevWeight !== 0 && prevPrice > 0) {
+      portRet += bookFrac * prevWeight * (t.lastClose / prevPrice - 1);
+    }
+    // funding while long since last step (point-in-time)
+    if (bars.fundingT && bars.fundingR && lastStepTs) {
+      for (let fi = bars.fundingT.length - 1; fi >= 0; fi--) {
+        const ft = bars.fundingT[fi];
+        if (ft <= lastStepTs) break;
+        if (ft <= Date.now()) portRet -= bookFrac * prevWeight * bars.fundingR[fi];
+      }
+    }
+    // HONEST 1.45x LIQUIDATION: a coin's effective leverage = lev * coinWeight. At
+    // 1.45x (coinWeight~1) the liq distance is ~-69% intrabar, so this ~never fires
+    // on a daily bar — but it tracks the real flash-crash tail.
+    const effLev = lev * prevWeight;
+    if (effLev > 1 && prevPrice > 0 && bars.l && bars.l.length === bars.c.length) {
+      const intrabarLow = bars.l[bars.l.length - 1] / prevPrice - 1;
+      const liqDist = -(1 / effLev - MAINT);
+      if (intrabarLow <= liqDist) {
+        // this coin's slice is wiped: lose its book fraction of margin, go flat
+        portRet += (1 / N) * liqDist - bookFrac * prevWeight * (t.lastClose / prevPrice - 1); // undo the MTM, apply liq loss
+        trades.push({ symbol: coin.symbol, ts: t.lastTs, weightFrom: prevWeight, weightTo: 0, price: t.lastClose, fillPrice: t.lastClose, costUsd: 0, note: `LIQUIDATED ${effLev.toFixed(2)}x` });
+        newPositions.push({ symbol: coin.symbol, weight: 0, entryPrice: t.lastClose });
+        continue;
+      }
+    }
+    // rebalance this coin to its target weight
+    const wTo = t.weight;
+    if (Math.abs(wTo - prevWeight) > 0.02) {
+      const side = Math.sign(wTo - prevWeight);
+      const tradeCost = bookFrac * Math.abs(wTo - prevWeight) * ((DEFAULT_FEE_BPS / 1e4) + slip);
+      portRet -= tradeCost;
+      trades.push({ symbol: coin.symbol, ts: t.lastTs, weightFrom: prevWeight, weightTo: wTo, price: t.lastClose, fillPrice: t.lastClose * (1 + side * slip), costUsd: tradeCost * equity, note: `core4:sma${coin.smaWin}c${coin.chopThr}` });
+    }
+    newPositions.push({ symbol: coin.symbol, weight: Math.abs(wTo - prevWeight) > 0.02 ? wTo : prevWeight, entryPrice: t.lastClose });
+  }
+  // leverage borrow cost on EXPOSED days only (book held a levered position)
+  const anyExposed = newPositions.some((p) => Math.abs(p.weight) > 1e-6);
+  if (lev > 1 && anyExposed) portRet -= (lev - 1) * (0.10 / 365);
+  if (stepTs === 0) return null;
+  return { stepTs, portRet, newPositions, trades };
+}
+
 const EWMA_LAMBDA = 0.94;
 
 /** Compute the strategy's target weight for a symbol from the latest CLOSED bar. */
@@ -250,7 +350,14 @@ export const paperStep = schedules.task({
         // ivsleeve trades ONE coin from the point-in-time DVOL signal; onchain /
         // xsection have their own engines (framework ready, not yet seeded). DSL
         // sleeves use the per-symbol compiled-expr path below.
-        if (isIvSleeve(rawDoc)) {
+        if (isCore4(rawDoc)) {
+          // FLAGSHIP CORE-4 portfolio: step all 4 coins, combine equal-weight x leverage.
+          const prevMap = new Map(positions.map((p) => [p.symbol, { weight: p.weight, entryPrice: p.entryPrice }]));
+          const step = await core4ForwardStep(rawDoc, acct.equity, prevMap, acct.lastStepTs, getBars);
+          if (!step) { logger.log(`core4 "${cand.name}": bars unavailable, skipped`); continue; }
+          stepTs = step.stepTs; portRet = step.portRet; newPositions = step.newPositions; trades = step.trades;
+          for (const t of trades) costUsd += t.costUsd;
+        } else if (isIvSleeve(rawDoc)) {
           const cur = posBySym.get(rawDoc.symbol);
           const step = await ivForwardStep(rawDoc, params, acct.equity, cur?.weight ?? 0, cur?.entryPrice ?? 0, acct.lastStepTs);
           if (!step) { logger.log(`iv sleeve "${cand.name}": DVOL/bars unavailable, skipped`); continue; }
