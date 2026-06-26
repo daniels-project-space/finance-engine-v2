@@ -30,7 +30,7 @@ function CandidatesInner() {
       </div>
 
       {/* top by composite (works even when nobody is 'alive') */}
-      <Panel title="Top by composite" right={<Link href="/tournament" className="num text-[10px] text-dim hover:text-fg">tournament →</Link>}>
+      <Panel title="Top by composite" right={<Link href="/strategies" className="num text-[10px] text-dim hover:text-fg">strategies →</Link>}>
         <div className="grid md:grid-cols-2 gap-x-6 gap-y-1">
           {(board ?? []).map((c, i) => {
             const m: Record<string, number> = safeParse(c.metrics) ?? {};

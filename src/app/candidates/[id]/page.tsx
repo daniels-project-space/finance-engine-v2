@@ -62,7 +62,7 @@ export default function CandidateDetail({ params }: { params: Promise<{ id: stri
   return (
     <div className="space-y-4 stagger">
       {/* back */}
-      <Link href="/tournament" className="num text-[11px] text-dim hover:text-fg inline-flex items-center gap-1">← tournament</Link>
+      <Link href="/strategies" className="num text-[11px] text-dim hover:text-fg inline-flex items-center gap-1">← strategies</Link>
 
       {/* ===================== HEADER ===================== */}
       <Panel pad="p-6">

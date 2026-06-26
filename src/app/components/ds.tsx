@@ -60,6 +60,33 @@ export function Panel({ title, right, children, className = "", pad = "p-5", hov
   );
 }
 
+// ---------------------------------------------------------------- Lead summary
+// The one-sentence plain-English answer at the top of each page. Big, calm, leads
+// with the conclusion before any numbers. Optional status dot + tone.
+export function Lead({ children, dot, tone = "fg" }: { children: ReactNode; dot?: "live" | "ok" | "warn"; tone?: Tone }) {
+  const dotColor = dot === "live" ? "bg-info live-dot" : dot === "ok" ? "bg-up" : dot === "warn" ? "bg-accent" : "";
+  return (
+    <div className="flex items-start gap-3 pt-3 pb-1">
+      {dot && <span className={`w-2.5 h-2.5 rounded-full mt-2 shrink-0 ${dotColor}`} />}
+      <p className={`text-[19px] leading-snug font-medium max-w-3xl ${toneText(tone)}`}>{children}</p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- Info tooltip
+// A tiny "?" that holds the technical term for anyone who wants it, so the page
+// can use plain language while staying honest. Pure CSS hover (no JS state).
+export function Info({ children }: { children: ReactNode }) {
+  return (
+    <span className="relative inline-flex items-center group align-middle ml-1">
+      <span className="w-[13px] h-[13px] rounded-full border border-edge text-faint text-[8px] flex items-center justify-center cursor-help leading-none">?</span>
+      <span className="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 z-30 hidden group-hover:block w-56 rounded-lg border border-edge bg-ink px-3 py-2 num text-[10px] text-mid leading-relaxed shadow-xl">
+        {children}
+      </span>
+    </span>
+  );
+}
+
 // ---------------------------------------------------------------- Stat tile
 export function Stat({ label, value, unit, tone = "fg", sub, spark, size = "md" }: {
   label: string; value: ReactNode; unit?: string; tone?: Tone; sub?: ReactNode;

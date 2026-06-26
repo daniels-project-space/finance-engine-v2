@@ -33,7 +33,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <NavLinks />
               <div className="ml-auto hud hidden lg:flex items-center gap-2">
                 <span className="w-1.5 h-1.5 rounded-full bg-up live-dot" />
-                paper · perps · ccxt · 24×3tf
+                testing with fake money
               </div>
             </div>
           </header>
