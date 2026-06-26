@@ -326,6 +326,22 @@ export const paperBook = query({
 });
 
 /**
+ * BENCHMARKS — the raw SPX + BTC buy-and-hold reference price series ({t,c}) so
+ * EVERY chart on the dashboard can overlay them (rebased to each chart's window,
+ * client-side). Read-only: just returns the two persisted benchmark configs. One
+ * query feeds all charts (cached by Convex reactivity). NaN-guarded downstream.
+ */
+export const benchmarks = query({
+  args: {},
+  handler: async (ctx) => {
+    const spx = await ctx.db.query("config").withIndex("by_key", (q) => q.eq("key", "benchmark_spx")).first();
+    const btc = await ctx.db.query("config").withIndex("by_key", (q) => q.eq("key", "benchmark_btc")).first();
+    const parse = (s?: string) => { if (!s) return null; try { return JSON.parse(s) as { t: number[]; c: number[] }; } catch { return null; } };
+    return { spx: parse(spx?.json), btc: parse(btc?.json) };
+  },
+});
+
+/**
  * TREND vs HODL drawdown comparison — the "safer than HODL" payoff. Returns the
  * best trend-beta sleeve's BACKTEST equity (its WF OOS curve) + an UNDERWATER
  * (drawdown) curve, alongside BTC HODL rebased over the SAME window + its

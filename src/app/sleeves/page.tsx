@@ -14,22 +14,19 @@ const ORTHO: Record<string, { rho: string; tone: "down" | "accent" | "up" }> = {
   "On-chain (MVRV/NVT)": { rho: "~0.33", tone: "accent" }, // strong standalone, moderate corr
 };
 
+// SLEEVES — lean: just the family cards (the orthogonal alpha sources). The intro
+// blurb and the premium-survival table were removed for clarity.
 export default function SleevesPage() {
   const families = useQuery(api.dashboard.sleeveFamilies, {});
-  const premium = useQuery(api.premium.premiumSnapshot, {});
 
   return (
-    <div className="space-y-4 stagger">
-      <Panel pad="p-4">
-        <div className="hud mb-1">Sleeve families — the orthogonal alpha sources we built</div>
-        <div className="num text-[11px] text-dim">A promotable book needs diversified sleeves (low mutual correlation). Market-beta momentum is exhausted; the edge is in the orthogonal lanes.</div>
-      </Panel>
-
+    <div className="space-y-5 stagger">
+      <div className="hud pt-2">Sleeve families — orthogonal alpha sources (ρ≈market shown)</div>
       <div className="grid md:grid-cols-2 gap-4">
         {(families ?? []).map((f) => {
           const o = ORTHO[f.family];
           return (
-            <Panel key={f.family} pad="p-4" hover>
+            <Panel key={f.family} pad="p-5" hover>
               <div className="flex items-start justify-between gap-3 mb-3">
                 <div className="min-w-0">
                   <div className="text-fg font-semibold text-sm">{f.family}</div>
@@ -56,29 +53,6 @@ export default function SleevesPage() {
         })}
         {!families?.length && <div className="hud py-8 text-center col-span-2">loading families…</div>}
       </div>
-
-      {/* premium-family payoff table */}
-      <Panel title="Risk-premium families — which premia actually pay">
-        <div className="tablewrap">
-          <table className="dt">
-            <thead><tr><th>premium</th><th>attempts</th><th>survived</th><th>survival</th><th>mean comp</th><th>failed S4</th><th>failed sealed</th></tr></thead>
-            <tbody>
-              {(premium ?? []).sort((a, b) => b.attempts - a.attempts).map((p) => (
-                <tr key={p.premium}>
-                  <td style={{ textAlign: "left" }} className="text-mid">{p.premium.replace(/_/g, " ")}</td>
-                  <td className="dt-num text-fg">{p.attempts}</td>
-                  <td className="dt-num text-dim">{p.survived}</td>
-                  <td className={`dt-num ${p.survivalRate > 0 ? "text-up" : "text-dim"}`}>{(p.survivalRate * 100).toFixed(0)}%</td>
-                  <td className={`dt-num ${p.meanComposite > 0 ? "text-fg" : "text-down"}`}>{fmt(p.meanComposite)}</td>
-                  <td className="dt-num text-dim">{p.failedS4}</td>
-                  <td className="dt-num text-dim">{p.failedSealed}</td>
-                </tr>
-              ))}
-              {!premium?.length && <tr><td colSpan={7} className="hud py-4" style={{ textAlign: "center" }}>no premium data yet</td></tr>}
-            </tbody>
-          </table>
-        </div>
-      </Panel>
     </div>
   );
 }

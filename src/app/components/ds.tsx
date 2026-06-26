@@ -6,7 +6,7 @@
 // All SVG is NaN-guarded.
 
 import Link from "next/link";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 // ---------------------------------------------------------------- formatters
 export function fmt(x: number | null | undefined, d = 2): string {
@@ -243,6 +243,144 @@ export function Chart({ series, height = 220, yLabel = "growth of $1", showArea 
       })()}
       <text x={6} y={11} fontSize="7.5" fill="#364250" fontFamily="var(--font-mono)">{yLabel}</text>
     </svg>
+  );
+}
+
+// =============================================== Benchmark overlay + 3-way metrics
+// SPX + BTC buy-and-hold reference, rebased to ANY chart's window, plus a compact
+// three-way metrics strip (strategy vs SPX vs BTC). Reused on every chart so Daniel
+// always sees his strategy vs the two benchmarks. All NaN-guarded.
+
+export interface Benchmarks { spx: { t: number[]; c: number[] } | null; btc: { t: number[]; c: number[] } | null }
+
+// rebase a {t,c} price series to growth-of-1 over [t0,t1]; skip non-finite/<=0
+// closes so one bad row can't NaN-poison the chart.
+export function rebaseBench(raw: { t: number[]; c: number[] } | null | undefined, t0: number, t1: number): Curve | undefined {
+  if (!raw || !t0 || !t1) return undefined;
+  const t: number[] = [], eq: number[] = [];
+  let base = 0;
+  for (let i = 0; i < Math.min(raw.t.length, raw.c.length); i++) {
+    const ts = raw.t[i], close = raw.c[i];
+    if (ts < t0 || ts > t1) continue;
+    if (!Number.isFinite(close) || close <= 0) continue;
+    if (!base) base = close;
+    t.push(ts); eq.push(close / base);
+  }
+  return t.length > 2 ? { t, eq } : undefined;
+}
+
+// summary stats for a growth-of-1 curve (total return, maxDD, Sharpe-ish, winRate)
+export interface CurveStats { total: number; maxDD: number; sharpe: number | null; winRate: number | null; calmar: number | null }
+export function curveStats(c?: Curve | null, ppy = 252): CurveStats {
+  if (!c?.eq?.length || c.eq.length < 2) return { total: 0, maxDD: 0, sharpe: null, winRate: null, calmar: null };
+  const eq = c.eq;
+  const total = eq[eq.length - 1] / eq[0] - 1;
+  let peak = -Infinity, maxDD = 0;
+  for (const v of eq) { peak = Math.max(peak, v); const d = peak > 0 ? v / peak - 1 : 0; if (d < maxDD) maxDD = d; }
+  const rets: number[] = []; let wins = 0;
+  for (let i = 1; i < eq.length; i++) { if (eq[i - 1] > 0) { const r = eq[i] / eq[i - 1] - 1; if (Number.isFinite(r)) { rets.push(r); if (r > 0) wins++; } } }
+  const mean = rets.length ? rets.reduce((a, b) => a + b, 0) / rets.length : 0;
+  const sd = rets.length ? Math.sqrt(Math.max(0, rets.reduce((a, b) => a + b * b, 0) / rets.length - mean * mean)) : 0;
+  const sharpe = rets.length > 10 && sd > 1e-12 ? (mean / sd) * Math.sqrt(ppy) : null;
+  const years = Math.max(0.01, (c.t[c.t.length - 1] - c.t[0]) / (365 * 86400_000));
+  const cagr = eq[eq.length - 1] > 0 ? Math.pow(eq[eq.length - 1] / eq[0], 1 / years) - 1 : -1;
+  return { total, maxDD, sharpe, winRate: rets.length ? wins / rets.length : null, calmar: maxDD < 0 ? cagr / Math.abs(maxDD) : null };
+}
+
+// three-way comparison strip: strategy vs SPX vs BTC, side by side.
+export function ThreeWayMetrics({ strat, spx, btc, stratLabel = "Strategy", ppy = 252 }: {
+  strat?: Curve | null; spx?: Curve | null; btc?: Curve | null; stratLabel?: string; ppy?: number;
+}) {
+  const cols: { label: string; color: string; s: CurveStats }[] = [];
+  if (strat) cols.push({ label: stratLabel, color: "#3ddb9e", s: curveStats(strat, ppy) });
+  if (spx) cols.push({ label: "S&P 500", color: "#8b9aab", s: curveStats(spx, ppy) });
+  if (btc) cols.push({ label: "BTC HODL", color: "#f5b932", s: curveStats(btc, ppy) });
+  if (!cols.length) return null;
+  const rows: { k: string; f: (s: CurveStats) => string; tone?: (s: CurveStats) => string }[] = [
+    { k: "Total return", f: (s) => `${s.total >= 0 ? "+" : ""}${(s.total * 100).toFixed(0)}%`, tone: (s) => s.total >= 0 ? "text-up" : "text-down" },
+    { k: "Max drawdown", f: (s) => `${(s.maxDD * 100).toFixed(0)}%`, tone: () => "text-down" },
+    { k: "Sharpe", f: (s) => s.sharpe == null ? "—" : s.sharpe.toFixed(2) },
+    { k: "Win rate", f: (s) => s.winRate == null ? "—" : `${(s.winRate * 100).toFixed(0)}%` },
+    { k: "Calmar", f: (s) => s.calmar == null ? "—" : s.calmar.toFixed(2) },
+  ];
+  return (
+    <div className="rounded-lg border border-edge/50 overflow-hidden">
+      <div className="grid" style={{ gridTemplateColumns: `92px repeat(${cols.length}, 1fr)` }}>
+        <div className="hud px-3 py-2 bg-[#ffffff04]">metric</div>
+        {cols.map((c) => (
+          <div key={c.label} className="px-3 py-2 bg-[#ffffff04] flex items-center gap-1.5 justify-end">
+            <span className="w-2 h-[3px] rounded-sm" style={{ background: c.color }} />
+            <span className="num text-[10px]" style={{ color: c.color }}>{c.label}</span>
+          </div>
+        ))}
+        {rows.map((r, ri) => (
+          <div key={r.k} className="contents">
+            <div className={`hud px-3 py-1.5 ${ri % 2 ? "" : "bg-[#ffffff02]"}`}>{r.k}</div>
+            {cols.map((c) => (
+              <div key={c.label} className={`num text-[12px] text-right px-3 py-1.5 ${ri % 2 ? "" : "bg-[#ffffff02]"} ${r.tone ? r.tone(c.s) : "text-fg"}`}>{r.f(c.s)}</div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// =============================================== ChartWithBenchmarks
+// The universal chart: the primary series + faded SPX/BTC reference overlays
+// (rebased to the chart window), with a per-chart toggle to show/hide them, and an
+// optional three-way metrics strip below. Remembers the toggle in localStorage.
+let _bench: Benchmarks | null = null;       // module-level cache so all charts share one fetch
+export function setBenchmarks(b: Benchmarks | null) { _bench = b; }
+
+function useBenchToggle(storeKey: string, dflt: boolean): [boolean, () => void] {
+  const [on, setOn] = useState(dflt);
+  useEffect(() => {
+    try { const v = localStorage.getItem(`bench:${storeKey}`); if (v != null) setOn(v === "1"); } catch { /* */ }
+  }, [storeKey]);
+  const toggle = () => setOn((p) => { const n = !p; try { localStorage.setItem(`bench:${storeKey}`, n ? "1" : "0"); } catch { /* */ } return n; });
+  return [on, toggle];
+}
+
+export function ChartWithBenchmarks({
+  series, benchmarks, height = 220, yLabel = "growth of $1", showArea = true, showMetrics = false,
+  storeKey = "default", stratLabel, ppy = 252, defaultOn = true,
+}: {
+  series: Series[]; benchmarks?: Benchmarks | null; height?: number; yLabel?: string; showArea?: boolean;
+  showMetrics?: boolean; storeKey?: string; stratLabel?: string; ppy?: number; defaultOn?: boolean;
+}) {
+  const [on, toggle] = useBenchToggle(storeKey, defaultOn);
+  const bench = benchmarks ?? _bench;
+  // window of the PRIMARY series, to rebase the benchmarks onto
+  const prim = series.find((s) => s.curve?.t?.length);
+  const t0 = prim?.curve.t?.[0] ?? 0;
+  const t1 = prim?.curve.t?.[(prim?.curve.t.length ?? 1) - 1] ?? 0;
+  const spx = on ? rebaseBench(bench?.spx, t0, t1) : undefined;
+  const btc = on ? rebaseBench(bench?.btc, t0, t1) : undefined;
+  const overlay: Series[] = [
+    ...series,
+    ...(spx ? [{ name: "S&P 500", color: "#8b9aab", curve: spx, dash: true } as Series] : []),
+    ...(btc ? [{ name: "BTC HODL", color: "#f5b932", curve: btc, dash: true } as Series] : []),
+  ];
+  const hasBench = !!(bench?.spx || bench?.btc);
+  return (
+    <div>
+      {hasBench && (
+        <div className="flex items-center justify-end mb-1.5">
+          <button onClick={toggle} title="toggle S&P 500 + BTC buy-and-hold reference overlays"
+            className={`num text-[9px] px-2 py-0.5 rounded-md border transition-colors ${on ? "text-mid border-edge bg-[#ffffff06]" : "text-dim border-edge/50 hover:text-mid"}`}>
+            <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1.5 align-middle ${on ? "bg-info" : "bg-faint"}`} />
+            vs S&amp;P / BTC {on ? "on" : "off"}
+          </button>
+        </div>
+      )}
+      <Chart series={overlay} height={height} yLabel={yLabel} showArea={showArea} />
+      {showMetrics && (
+        <div className="mt-3">
+          <ThreeWayMetrics strat={prim?.curve} spx={on ? spx : undefined} btc={on ? btc : undefined} stratLabel={stratLabel ?? prim?.name} ppy={ppy} />
+        </div>
+      )}
+    </div>
   );
 }
 

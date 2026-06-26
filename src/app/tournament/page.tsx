@@ -4,7 +4,7 @@ import { useQuery } from "convex/react";
 import Link from "next/link";
 import { useState } from "react";
 import { api } from "../../../convex/_generated/api";
-import { Chart, Panel, Stat, StageBadge, Pill, Spark, fmt, pct, type Curve } from "../components/ds";
+import { ChartWithBenchmarks, Panel, StageBadge, Pill, Spark, fmt, pct, type Curve } from "../components/ds";
 import { srcColor, familyOf } from "../components/widgets2";
 
 interface Row {
@@ -28,29 +28,9 @@ function parseRow(c: { _id: string; name: string; stage: string; source: string;
   };
 }
 
-function safeParse<T>(s: string | undefined | null): T | null { if (!s) return null; try { return JSON.parse(s) as T; } catch { return null; } }
-
-// rebase a {t,c} benchmark to growth-of-1 over [t0,t1]; skip non-finite/<=0 closes
-// so one bad row can't NaN-poison the chart.
-function rebase(raw: string | null | undefined, t0: number, t1: number): Curve | undefined {
-  const b = safeParse<{ t: number[]; c: number[] }>(raw ?? null);
-  if (!b || !t0 || !t1) return undefined;
-  const t: number[] = [], eq: number[] = [];
-  let base = 0;
-  for (let i = 0; i < Math.min(b.t.length, b.c.length); i++) {
-    const ts = b.t[i], close = b.c[i];
-    if (ts < t0 || ts > t1) continue;
-    if (!Number.isFinite(close) || close <= 0) continue;
-    if (!base) base = close;
-    t.push(ts); eq.push(close / base);
-  }
-  return t.length > 2 ? { t, eq } : undefined;
-}
-
 export default function TournamentPage() {
   const rowsRaw = useQuery(api.candidates.tournament, { limit: 60 });
-  const spxRaw = useQuery(api.pipeline.getConfig, { key: "benchmark_spx" });
-  const btcRaw = useQuery(api.pipeline.getConfig, { key: "benchmark_btc" });
+  const bench = useQuery(api.dashboard.benchmarks, {});
   const [selected, setSelected] = useState<string | null>(null);
 
   const rows = (rowsRaw ?? []).map(parseRow);
@@ -60,12 +40,6 @@ export default function TournamentPage() {
   const sel = rows.find((r) => r.id === selected) ?? rows[0];
   const headline = sel?.curve;
   const t0 = headline?.t?.[0] ?? 0, t1 = headline?.t?.[headline.t.length - 1] ?? 0;
-  const spx = rebase(spxRaw, t0, t1);
-  const btc = rebase(btcRaw, t0, t1);
-  const stratMult = headline?.eq?.length ? headline.eq[headline.eq.length - 1] : undefined;
-  const spxMult = spx?.eq?.length ? spx.eq[spx.eq.length - 1] : undefined;
-  const btcMult = btc?.eq?.length ? btc.eq[btc.eq.length - 1] : undefined;
-  // explicit window label so a high BTC-HODL multiple is not read as BTC always wins
   const fmtD = (ts: number) => ts ? new Date(ts).toISOString().slice(0, 7) : "?";
   const windowYrs = t0 && t1 ? ((t1 - t0) / (365 * 86400_000)).toFixed(1) : "?";
   const windowLabel = t0 && t1 ? `${fmtD(t0)} - ${fmtD(t1)} (${windowYrs}y)` : "";
@@ -96,24 +70,14 @@ export default function TournamentPage() {
               {windowLabel && <span className="num text-[11px] text-accent">window {windowLabel}</span>}
               {sel.failedStage && <span className="num text-[11px] text-down">died at {sel.failedStage}</span>}
             </div>
-            <Chart height={300} yLabel="growth of $10k" series={[
-              { name: sel.alive ? "strategy (live)" : "strategy (backtest)", color: "#3ddb9e", curve: headline },
-              ...(spx ? [{ name: "S&P 500", color: "#8b9aab", curve: spx, dash: true }] : []),
-              ...(btc ? [{ name: "BTC HODL", color: "#f5b932", curve: btc, dash: true }] : []),
-            ]} />
-            {stratMult !== undefined && (
-              <div className="flex items-center gap-3 mt-3 flex-wrap">
-                <span className="num text-[12px] text-dim">$10k →
-                  <span className="text-up"> ${(stratMult * 10000).toFixed(0)}</span> strategy
-                  {spxMult !== undefined && <span className="text-mid"> · ${(spxMult * 10000).toFixed(0)} S&P 500</span>}
-                  {btcMult !== undefined && <span className="text-accent"> · ${(btcMult * 10000).toFixed(0)} BTC HODL</span>}
-                </span>
-                {spxMult !== undefined && <Pill tone={stratMult > spxMult ? "up" : "down"}>{stratMult > spxMult ? "beats" : "trails"} S&P</Pill>}
-                {btcMult !== undefined && <Pill tone={stratMult > btcMult ? "up" : "down"}>{stratMult > btcMult ? "beats" : "trails"} BTC</Pill>}
-              </div>
-            )}
-            <p className="num text-[10px] text-dim mt-2">
-              All three lines rebased to $10k over the SAME window ({windowLabel}). The benchmark multiple depends on the window — one starting near a market bottom flatters BTC HODL, so read beats/trails only relative to THIS period, not as BTC always wins. For the regime-complete trend-vs-HODL story (incl. the 2022/2025 crashes) see the Overview.{sel.failedStage ? ` This candidate died at ${sel.failedStage} — a strong backtest that did not clear the full gauntlet, shown honestly.` : ""}
+            <ChartWithBenchmarks
+              height={300} yLabel="growth of $1" showMetrics
+              storeKey="tournament" benchmarks={bench}
+              stratLabel={sel.alive ? "strategy (live)" : "strategy (backtest)"}
+              series={[{ name: sel.alive ? "strategy (live)" : "strategy (backtest)", color: "#3ddb9e", curve: headline }]}
+            />
+            <p className="num text-[10px] text-dim mt-3">
+              Strategy vs S&amp;P 500 &amp; BTC buy-and-hold, all rebased over the SAME window ({windowLabel}). Toggle the benchmarks above each chart. A high BTC multiple can just reflect a window starting near a bottom — read beats/trails relative to THIS period.{sel.failedStage ? ` Died at ${sel.failedStage} — strong backtest, did not clear the full gauntlet, shown honestly.` : ""}
             </p>
           </>
         ) : <div className="well flex items-center justify-center" style={{ height: 300 }}><span className="hud">no scored candidates yet</span></div>}
