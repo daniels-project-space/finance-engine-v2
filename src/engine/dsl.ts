@@ -154,7 +154,7 @@ function strategyCanon(doc: StrategyDoc, mode: "exact" | "family"): string {
       return i === undefined ? null : `p${i}[${p.min},${p.max}]`;
     }).filter(Boolean).sort();
     parts.push(ps.join(";"));
-    parts.push(`risk:${doc.risk.stopAtrMult ?? "-"}/${doc.risk.trailAtrMult ?? "-"}/${doc.risk.volTargetAnnual}/${doc.risk.maxLeverage}`);
+    parts.push(`risk:${doc.risk.stopAtrMult ?? "-"}/${doc.risk.trailAtrMult ?? "-"}/${doc.risk.trailActivate ?? "-"}/${doc.risk.trailOffset ?? "-"}/${doc.risk.volTargetAnnual}/${doc.risk.maxLeverage}`);
     parts.push(`tf:${doc.tf ?? "1h"}`);
   }
   return parts.join("|");

@@ -257,6 +257,9 @@ export function randomStrategy(seed: number): StrategyDoc {
     risk: {
       stopAtrMult: (useShort || rng() < 0.7) ? Number((1.5 + rng() * 2.5).toFixed(1)) : undefined, // short-capable strategies almost always carry an ATR stop (the thing that lets a short survive a squeeze)
       trailAtrMult: rng() < 0.4 ? Number((2 + rng() * 3).toFixed(1)) : undefined,
+      // PROFIT trailing stop (let winners run, lock in profit): activate +10..40%,
+      // trail 3..12% below the peak. ~30% of fresh strategies carry one.
+      ...(rng() < 0.3 ? { trailActivate: Number((0.1 + rng() * 0.3).toFixed(2)), trailOffset: Number((0.03 + rng() * 0.09).toFixed(2)) } : {}),
       volTargetAnnual: Number((0.15 + rng() * 0.45).toFixed(2)), // leverage appetite is part of the genome
       maxLeverage: Number((1 + rng() * 3).toFixed(1)),
     },
@@ -322,6 +325,7 @@ export function recipeOf(source: string, mutation?: string): string {
   if (m === "remove_filter") return "gp-op:remove_filter";
   if (m === "new_exit") return "gp-op:new_exit";
   if (m === "drop_shorts" || m === "add_shorts") return "gp-op:toggle_shorts";
+  if (m.endsWith("profit_trail")) return "gp-op:profit_trail";
   if (m.startsWith("toggle_") || m.startsWith("leverage_") || m.startsWith("tf_shift")) return "gp-op:risk_overlay";
   return "gp-op:other";
 }
@@ -462,9 +466,22 @@ export function mutateStrategy(parent: StrategyDoc, seed: number, hint?: Mutatio
         // risk/leverage/timeframe overlay tweak
         const r = doc.risk;
         const roll = rng();
-        if (roll < 0.3) { r.stopAtrMult = r.stopAtrMult ? undefined : Number((1.5 + rng() * 2.5).toFixed(1)); mutation = "toggle_stop"; }
-        else if (roll < 0.55) { r.trailAtrMult = r.trailAtrMult ? undefined : Number((2 + rng() * 3).toFixed(1)); mutation = "toggle_trail"; }
-        else if (roll < 0.8) {
+        if (roll < 0.25) { r.stopAtrMult = r.stopAtrMult ? undefined : Number((1.5 + rng() * 2.5).toFixed(1)); mutation = "toggle_stop"; }
+        else if (roll < 0.45) { r.trailAtrMult = r.trailAtrMult ? undefined : Number((2 + rng() * 3).toFixed(1)); mutation = "toggle_trail"; }
+        else if (roll < 0.62) {
+          // toggle / tune the PROFIT trailing stop (let-winners-run, lock-in-profit)
+          if (r.trailActivate !== undefined && rng() < 0.5) {
+            // tune the existing activate/offset levels
+            r.trailActivate = Number(Math.min(0.6, Math.max(0.05, r.trailActivate * (0.7 + rng() * 0.9))).toFixed(2));
+            r.trailOffset = Number(Math.min(0.2, Math.max(0.02, (r.trailOffset ?? 0.05) * (0.7 + rng() * 0.9))).toFixed(2));
+            mutation = "tune_profit_trail";
+          } else if (r.trailActivate !== undefined) {
+            r.trailActivate = undefined; r.trailOffset = undefined; mutation = "drop_profit_trail";
+          } else {
+            r.trailActivate = Number((0.1 + rng() * 0.3).toFixed(2)); r.trailOffset = Number((0.03 + rng() * 0.09).toFixed(2)); mutation = "add_profit_trail";
+          }
+        }
+        else if (roll < 0.82) {
           const f = 0.7 + rng() * 0.9;
           r.volTargetAnnual = Number(Math.min(0.6, Math.max(0.1, r.volTargetAnnual * f)).toFixed(2));
           r.maxLeverage = Number(Math.min(4, Math.max(1, r.maxLeverage * f)).toFixed(1));

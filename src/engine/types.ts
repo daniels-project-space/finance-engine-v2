@@ -60,6 +60,12 @@ export interface RiskSpec {
   stopAtrMult?: number;
   /** ATR-multiple trailing stop (omit = none) */
   trailAtrMult?: number;
+  /** PROFIT trailing stop: activate once the trade is up >= trailActivate (fraction,
+   *  e.g. 0.2 = +20%), then exit when profit retraces >= trailOffset (e.g. 0.05 = 5%)
+   *  below its running PEAK. Lets winners run, locks in profit. Works long + short.
+   *  Both must be present to engage; coexists with the hard ATR stop. (omit = none) */
+  trailActivate?: number;
+  trailOffset?: number;
   /** Annualized volatility target, e.g. 0.25 */
   volTargetAnnual: number;
   /** Max absolute weight (leverage) */

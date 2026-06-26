@@ -67,7 +67,8 @@ Strategy object:
   "tf?":"1h"|"4h"|"1d",  // bar timeframe (default 1h); slower tf = scaled trade-count floors
   "longEntry":BoolExpr,"longExit":BoolExpr,"shortEntry?":BoolExpr,"shortExit?":BoolExpr,
   "params":{name:{min,max,default,int?}}, // <=6 params
-  "risk":{"stopAtrMult?":num,"trailAtrMult?":num,"volTargetAnnual":0.1-0.6,"maxLeverage":1-4}}
+  "risk":{"stopAtrMult?":num,"trailAtrMult?":num,"trailActivate?":0.1-0.4,"trailOffset?":0.03-0.12,"volTargetAnnual":0.1-0.6,"maxLeverage":1-4}}
+ //   trailActivate+trailOffset = PROFIT trailing stop: once the trade is up >= trailActivate (e.g. 0.2 = +20%) it arms, then exits when profit retraces >= trailOffset (e.g. 0.05 = 5%) below its peak. "Let winners run, lock in profit" — ideal for breakout/momentum entries that catch big runs. Both must be set together; coexists with the ATR stop.
 Leverage appetite (volTargetAnnual + maxLeverage) is judged by the same drawdown floors — an account bust in backtest is terminal, so size deliberately.
 
 Constraints: <=48 nodes per expression, depth <=10, periods 1..500. Strategies trade 1h bars on BTC/ETH/SOL/BNB/XRP USDT perps, costs ~7bps/side + funding. They must survive: re-tuning walk-forward (OOS Sharpe>0.5, 55% positive months), cross-symbol generalization (3/5 pairs), DSR>0.95 deflated for all trials ever, permutation test p<0.05, 3x slippage, crisis replays, then a sealed holdout and 30 days of live paper. Design for robustness, not in-sample fit: prefer structural/regime-aware mechanisms, few params, slow signals over fast noise. Aim 30-300 trades/yr.

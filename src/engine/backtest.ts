@@ -60,7 +60,12 @@ export function runBacktestPrepared(
   const trades: Trade[] = [];
   let openEntryI = -1;
 
-  const { stopAtrMult, trailAtrMult, volTargetAnnual, maxLeverage } = doc.risk;
+  const { stopAtrMult, trailAtrMult, trailActivate, trailOffset, volTargetAnnual, maxLeverage } = doc.risk;
+  // PROFIT trailing stop state: peakPx = most favorable close since entry (high for
+  // long, low for short); profitTrailOn = activated once profit >= trailActivate.
+  let peakPx = NaN;
+  let profitTrailOn = false;
+  const profitTrailEnabled = trailActivate !== undefined && trailOffset !== undefined && trailActivate > 0 && trailOffset > 0;
   const perBarTargetVar = (volTargetAnnual * volTargetAnnual) / opts.ppy;
 
   for (let i = startI; i <= endI; i++) {
@@ -74,6 +79,20 @@ export function runBacktestPrepared(
     if (dir !== 0 && !Number.isNaN(stopLevel)) {
       if (dir === 1 && inp.c[i] <= stopLevel) stopHit = true;
       if (dir === -1 && inp.c[i] >= stopLevel) stopHit = true;
+    }
+    // PROFIT trailing stop (point-in-time, conservative close-based fill): track the
+    // peak FAVORABLE close since entry; activate once profit >= trailActivate; then
+    // exit when profit retraces >= trailOffset below that peak. Works long + short.
+    if (dir !== 0 && profitTrailEnabled && !Number.isNaN(entryPx) && entryPx > 0 && !Number.isNaN(inp.c[i])) {
+      if (Number.isNaN(peakPx)) peakPx = inp.c[i];
+      peakPx = dir === 1 ? Math.max(peakPx, inp.c[i]) : Math.min(peakPx, inp.c[i]);
+      const curProfit = dir === 1 ? inp.c[i] / entryPx - 1 : entryPx / inp.c[i] - 1;        // signed profit of the position
+      if (!profitTrailOn && curProfit >= (trailActivate as number)) profitTrailOn = true;     // arm once it's run far enough
+      if (profitTrailOn) {
+        // retracement from the peak favorable price, as a fraction (conservative: uses close)
+        const retrace = dir === 1 ? peakPx / inp.c[i] - 1 : inp.c[i] / peakPx - 1;
+        if (retrace >= (trailOffset as number)) stopHit = true;                               // give back trailOffset from peak -> exit
+      }
     }
     if (dir !== 0 && trailAtrMult && !Number.isNaN(sig.atr14[i])) {
       if (dir === 1) {
@@ -105,11 +124,12 @@ export function runBacktestPrepared(
         openEntryI = i;
         entryPx = inp.c[i];
         trailRef = inp.c[i];
+        peakPx = inp.c[i]; profitTrailOn = false; // reset profit-trailing-stop on a fresh entry
         stopLevel = stopAtrMult && !Number.isNaN(sig.atr14[i])
           ? (newDir === 1 ? entryPx - stopAtrMult * sig.atr14[i] : entryPx + stopAtrMult * sig.atr14[i])
           : NaN;
       } else {
-        stopLevel = NaN; trailRef = NaN;
+        stopLevel = NaN; trailRef = NaN; peakPx = NaN; profitTrailOn = false;
       }
       dir = newDir;
     }
