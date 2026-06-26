@@ -146,7 +146,7 @@ async function trendForwardStep(
 const EWMA_LAMBDA = 0.94;
 
 /** Compute the strategy's target weight for a symbol from the latest CLOSED bar. */
-function targetWeight(doc: StrategyDoc, params: Record<string, number>, bars: Bars, prevDir: number): { dir: number; weight: number; lastClose: number; lastTs: number } {
+function targetWeight(doc: StrategyDoc, params: Record<string, number>, bars: Bars, prevDir: number, prevPrice = 0): { dir: number; weight: number; lastClose: number; lastTs: number } {
   // use the trailing 3000 bars for warm indicators
   const n = bars.t.length;
   const from = Math.max(0, n - 3000);
@@ -162,6 +162,32 @@ function targetWeight(doc: StrategyDoc, params: Record<string, number>, bars: Ba
   let dir = prevDir;
   if (dir === 1 && sig.longExit[i]) dir = 0;
   else if (dir === -1 && sig.shortExit && sig.shortExit[i]) dir = 0;
+  // ---- STOPS (point-in-time): a held position is also exited by the hard ATR stop
+  //      and the profit trailing stop, recomputed from bars <= now. We find the entry
+  //      bar by prevPrice and walk the peak favorable close forward (no look-ahead).
+  if (dir !== 0 && prevPrice > 0) {
+    // locate entry bar: the most recent bar whose close ~= prevPrice (entry fill)
+    let entryI = -1;
+    for (let k = i; k >= Math.max(1, i - 800); k--) { if (Math.abs(inp.c[k] - prevPrice) / prevPrice < 1e-4) { entryI = k; break; } }
+    if (entryI < 0) entryI = Math.max(1, i - 1); // fallback: assume recent
+    const closeNow = inp.c[i];
+    // hard ATR stop
+    const atr = sig.atr14[entryI];
+    if (doc.risk.stopAtrMult && Number.isFinite(atr)) {
+      const stopLvl = dir === 1 ? prevPrice - doc.risk.stopAtrMult * atr : prevPrice + doc.risk.stopAtrMult * atr;
+      if (dir === 1 && closeNow <= stopLvl) dir = 0;
+      if (dir === -1 && closeNow >= stopLvl) dir = 0;
+    }
+    // PROFIT trailing stop: peak favorable close since entry; arm at trailActivate; exit on trailOffset retrace
+    const { trailActivate, trailOffset } = doc.risk;
+    if (dir !== 0 && trailActivate !== undefined && trailOffset !== undefined && trailActivate > 0 && trailOffset > 0) {
+      let peak = inp.c[entryI];
+      for (let k = entryI; k <= i; k++) peak = dir === 1 ? Math.max(peak, inp.c[k]) : Math.min(peak, inp.c[k]);
+      const curProfit = dir === 1 ? closeNow / prevPrice - 1 : prevPrice / closeNow - 1;
+      const retrace = dir === 1 ? peak / closeNow - 1 : closeNow / peak - 1;
+      if (curProfit >= trailActivate && retrace >= trailOffset) dir = 0; // armed (ran far) AND gave back trailOffset -> exit
+    }
+  }
   if (dir === 0) {
     if (sig.longEntry[i]) dir = 1;
     else if (sig.shortEntry && sig.shortEntry[i]) dir = -1;
@@ -254,7 +280,7 @@ export const paperStep = schedules.task({
           const prevWeight = cur?.weight ?? 0;
           const prevPrice = cur?.entryPrice ?? 0;
           const prevDir = Math.sign(prevWeight);
-          const t = targetWeight(doc, params, bars, prevDir);
+          const t = targetWeight(doc, params, bars, prevDir, prevPrice);
           stepTs = Math.max(stepTs, t.lastTs);
 
           // mark-to-market on the bar we just closed
