@@ -130,6 +130,11 @@ export interface AppConfig {
    *  risk-premium-anchored prompt (mechanism-required). DEFAULT FALSE — the
    *  legacy prompt is the untouched default. Premium TAGGING is always live. */
   generation: {
+    /** MECHANISM-FIRST generation: route the GP lane through the curated mechanism
+     *  template library (instantiate/vary/combine coherent strategies) instead of
+     *  bottom-up random expression trees. Daniel's hand-built mechanism beat the old
+     *  random GP all session — this generates like a quant. Flag-gated (reversible). */
+    mechanismFirst?: boolean;
     premiumAnchoredGen: boolean;
   };
   /** WAVE-3b tuning knobs. bayesTuning swaps the random-search+hill-climb tuner
@@ -230,6 +235,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   // Premium TAGGING (the label + premiumStats rollup) is live regardless; only
   // the new anchored prompt and the Bayesian tuner are gated here.
   generation: {
+    mechanismFirst: false, // default OFF in code; shipped ON via the live config override (reversible)
     premiumAnchoredGen: true,
   },
   tuning: {

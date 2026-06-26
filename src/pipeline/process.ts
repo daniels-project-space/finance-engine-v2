@@ -8,7 +8,7 @@ import { mergeConfig, todayKey, type AppConfig } from "../lib/appConfig";
 import { loadBars, attachOnchain } from "../lib/data";
 import { artifactKey, putJsonGz, getJsonGz } from "../lib/storage";
 import { canonicalHash, familyHash, validateStrategy } from "../engine/dsl";
-import { crossoverStrategies, mutateStrategy, randomStrategy, recipeOf, setIcBias, MUTATION_OPS, type MutationHint, type MutationOp } from "../engine/evolve";
+import { crossoverStrategies, mutateStrategy, randomStrategy, mechanismFirstStrategy, mechanismKeys, recipeOf, setIcBias, MUTATION_OPS, type MutationHint, type MutationOp } from "../engine/evolve";
 import { icFamilyWeights, icRankingText, type IcRankedRow } from "../engine/signals";
 import { SEED_LIBRARY } from "../engine/library";
 import { IMPORTED_LIBRARY } from "../engine/imports";
@@ -205,10 +205,19 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
   }
 
   const freshN = Math.round((parents.length === 0 ? cfg.evo.batchGp + cfg.evo.batchFresh : cfg.evo.batchFresh) * scale);
+  const mechFirst = cfg.generation.mechanismFirst === true;
   for (let i = 0; i < freshN; i++) {
-    proposals.push({ doc: randomStrategy(seedBase + 100_000 + i), source: "gp", mechanism: "fresh", expectedComposite: globalMean, wild: false });
+    if (mechFirst) {
+      // MECHANISM-FIRST: instantiate/vary/combine a coherent template (the rebuilt
+      // quant-style discovery). mechanism key carries the template for attribution.
+      const { doc, mechanism } = mechanismFirstStrategy(seedBase + 100_000 + i);
+      proposals.push({ doc, source: "gp", mechanism, expectedComposite: globalMean, wild: false });
+    } else {
+      proposals.push({ doc: randomStrategy(seedBase + 100_000 + i), source: "gp", mechanism: "fresh", expectedComposite: globalMean, wild: false });
+    }
     summary.fresh++;
   }
+  if (mechFirst) log(`mechanism-first lane ON (templates: ${mechanismKeys().join(", ")})`);
 
   // ---- CROSS-SECTIONAL lane (momentum + PURE non-momentum, long-flat) -------
   // Universe-wide rank sleeves routed to the adapted gauntlet (S4 skipped). The
@@ -620,8 +629,20 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
     report: JSON.stringify({ sharpe: sealed.sharpe, ret: sealed.ret, maxDD: sealed.maxDD, trades: sealed.trades }), durationMs: 0,
   });
 
-  const composite = 0.5 * (report.metrics.portOosSharpe ?? report.metrics.wfPooledSharpe ?? 0) + 0.3 * sealed.sharpe + 0.2 * (report.metrics.fullSharpe ?? 0);
-  const metrics = { ...report.metrics, sealedSharpe: sealed.sharpe, sealedRet: sealed.ret, sealedMaxDD: sealed.maxDD, sealedCagr: sealed.cagr, sealedTrades: sealed.trades, composite };
+  const rawComposite = 0.5 * (report.metrics.portOosSharpe ?? report.metrics.wfPooledSharpe ?? 0) + 0.3 * sealed.sharpe + 0.2 * (report.metrics.fullSharpe ?? 0);
+  // SIMPLICITY BIAS (selection only — does NOT touch the gauntlet floors/pass-fail).
+  // A gentle tie-breaker on the breeding/ranking composite: simpler survivors are
+  // preferred to breed from, because simple = robust (Daniel's 2-rule mechanism beat
+  // 40-node monsters). Penalty caps at ~8% for the most complex; ~0 for lean docs.
+  const _cx = ((): number => {
+    const cnt = (e: unknown): number => { if (!e || typeof e !== "object") return 0; let k = 1; const o = e as Record<string, unknown>; for (const f of ["a", "b", "src", "period"]) if (o[f]) k += cnt(o[f]); return k; };
+    const d = JSON.parse(cand.dsl) as { longEntry?: unknown; longExit?: unknown; shortEntry?: unknown; shortExit?: unknown; params?: object };
+    const nodes = cnt(d.longEntry) + cnt(d.longExit) + cnt(d.shortEntry) + cnt(d.shortExit);
+    const nParams = d.params ? Object.keys(d.params).length : 0;
+    return Math.min(0.08, Math.max(0, (nodes - 12) * 0.002 + (nParams - 3) * 0.01)); // lean (<=12 nodes, <=3 params) => ~0
+  })();
+  const composite = rawComposite * (1 - _cx);
+  const metrics = { ...report.metrics, sealedSharpe: sealed.sharpe, sealedRet: sealed.ret, sealedMaxDD: sealed.maxDD, sealedCagr: sealed.cagr, sealedTrades: sealed.trades, composite, rawComposite, complexityPenalty: _cx };
 
   if (!sealed.passed) {
     await cx.mutation(api.candidates.updateStage, {

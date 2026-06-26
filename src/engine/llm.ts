@@ -113,7 +113,22 @@ ${lessons.length ? lessons.map((l) => `- ${l}`).join("\n") : "- (no lessons yet)
 ## Market notes
 ${marketNotes || "(none)"}
 
-Propose ${nProposals} DIVERSE strategies (different mechanism families — don't submit ${nProposals} variations of one idea). Each must include a falsifiable hypothesis naming the structural reason the edge exists (who is on the other side / what friction creates it).`;
+## How to think (MECHANISM-FIRST — reason like a quant, top-down)
+A hand-built 2-rule strategy (trend gated by a chop filter) beat every complex auto-generated one. WHY: it reasoned MARKET-STRUCTURE -> MECHANISM -> MINIMAL implementation. Do the same:
+ 1. Name a market-structure REGIME or FRICTION (trend vs chop vs range; crowding/funding; volatility clustering; breakout participation; carry).
+ 2. State the MECHANISM that exploits it + WHY the edge persists (who is on the other side / what friction creates it) — falsifiable.
+ 3. Implement it MINIMALLY: 1-4 params, a handful of nodes. SIMPLE = ROBUST. A 40-node monster overfits and dies in walk-forward; a 2-rule mechanism survives.
+
+Proven mechanism archetypes in the library (build on / vary / COMBINE these, or propose genuinely new ones with a clear rationale):
+ - trend + chop/regime filter (MA gated by ADX>thr or choppiness<thr — the winner)
+ - breakout + volume-confirmation + trailing stop (Wyckoff markup)
+ - mean-reversion ONLY in a range regime (low ADX / high choppiness)
+ - time-series momentum + trend filter (TSMOM)
+ - vol-regime trend (trade only when realized-vol percentile is moderate, not extreme)
+ - donchian breakout + trend filter; funding-carry tilt (long when funding low/negative)
+ - regime-SWITCH (trend-follow when trending, mean-revert in range) — one regime-conditional strategy
+
+Propose ${nProposals} strategies. Each = ONE coherent mechanism (NOT a kitchen-sink of indicators), with the structural hypothesis + the MINIMAL implementation. STRONGLY prefer few params/nodes. Diversify the mechanisms (don't submit ${nProposals} trend variants). Use the regime/chop ops (adx, choppiness, effratio), volume confirmation, and the trailing stop where the mechanism calls for them.`;
 }
 
 // CALIBRATION PASS: empirically-predictive-signal section for IC-steered prompts.

@@ -5,6 +5,7 @@
 
 import { mulberry32 } from "./stats";
 import { validateStrategy } from "./dsl";
+import { instantiateMechanism, combineMechanisms, MECHANISMS } from "./mechanisms";
 import type { Expr, ParamSpec, PriceField, StrategyDoc } from "./types";
 
 type Rng = () => number;
@@ -236,6 +237,52 @@ function genExit(rng: Rng, params: Record<string, ParamSpec>, entry: Expr): Expr
   // momentum fade: roc < 0
   return { op: "lt", a: { op: "roc", src: close, period: freshParam(params, 3, 40, 10) }, b: { op: "const", value: 0 } };
 }
+
+// effective node + param count for the simplicity bias (fewer = strongly preferred).
+function complexityOf(doc: StrategyDoc): { nodes: number; params: number } {
+  const count = (e: unknown): number => {
+    if (!e || typeof e !== "object") return 0;
+    let n = 1; const o = e as Record<string, unknown>;
+    for (const k of ["a", "b", "src", "period"]) if (o[k]) n += count(o[k]);
+    return n;
+  };
+  return { nodes: count(doc.longEntry) + count(doc.longExit) + count(doc.shortEntry) + count(doc.shortExit), params: Object.keys(doc.params).length };
+}
+
+/**
+ * MECHANISM-FIRST generation (the rebuilt discovery approach). Reasons top-down:
+ * pick a coherent, economically-grounded MECHANISM template, instantiate it with
+ * sampled params, sometimes combine two via a regime switch. A SMALL share stays
+ * free-form GP for exploration. Simplicity is the bias — templates are 1-4 params,
+ * and we reject anything that drifts above a tight node/param cap. Returns the
+ * mechanism key for bandit/ledger attribution. This is how Daniel (and quants)
+ * build strategies — vs the old bottom-up random-tree salads.
+ */
+export function mechanismFirstStrategy(seed: number, freeFormShare = 0.15): { doc: StrategyDoc; mechanism: string } {
+  const rng = mulberry32(seed);
+  for (let attempt = 0; attempt < 6; attempt++) {
+    let r: { doc: StrategyDoc; mechanism: string };
+    const roll = rng();
+    if (roll < freeFormShare) {
+      // small free-form exploration share (the old GP), but still simplicity-checked
+      r = { doc: randomStrategy(seed + attempt * 13 + 1), mechanism: "fresh_freeform" };
+    } else if (roll < freeFormShare + 0.18) {
+      r = combineMechanisms(rng);                   // regime-switch combination
+    } else {
+      r = instantiateMechanism(rng);                // the bulk: instantiate a template
+    }
+    if (validateStrategy(r.doc).length > 0) continue;
+    const cx = complexityOf(r.doc);
+    // SIMPLICITY GATE: mechanism templates are simple; reject any drift (free-form
+    // can produce bloat). Daniel's winner was 2 rules — keep generation lean.
+    if (cx.nodes <= 26 && cx.params <= 5) return r;
+  }
+  // fallback: a guaranteed-simple template instance
+  return instantiateMechanism(mulberry32(seed + 99));
+}
+
+/** keys of the mechanism library (for ideation context + reporting). */
+export function mechanismKeys(): string[] { return MECHANISMS.map((m) => m.key); }
 
 export function randomStrategy(seed: number): StrategyDoc {
   const rng = mulberry32(seed);
