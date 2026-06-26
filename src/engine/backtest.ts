@@ -6,7 +6,15 @@
 //  - turnover costs are charged on the bar where the new weight takes effect
 //  - stops are evaluated on close, exit takes effect next bar (conservative)
 // Funding: perp funding (8h) charged as w * rate at the first bar whose open
-// time is >= the funding timestamp. Long pays positive funding.
+// time is >= the funding timestamp. Long pays positive funding; a short (w<0)
+// RECEIVES positive funding (symmetric, the sign falls out of w*rate).
+// SHORT-SQUEEZE LIQUIDATION: a leveraged SHORT (held<0, |held|>1) is wiped if the
+// bar's intraday HIGH rips up past its liquidation distance (1/|held| - maint
+// margin). Crypto's violent up-wicks are the real tail risk of trend shorts, and a
+// close-to-close model misses them, so the gauntlet would otherwise reward fragile
+// leveraged shorts that liquidate live. We charge that squeeze tail here so shorts
+// are priced honestly. Unleveraged shorts (|held|<=1) cannot be liquidated by an
+// up-move alone, so they are unaffected.
 
 import { computeSignals, toArrays, type CompiledInputs } from "./compile";
 import { type BacktestOpts, type BacktestResult, type Bars, type Metrics, type StrategyDoc, type Trade } from "./types";
@@ -128,10 +136,12 @@ export function runBacktestPrepared(
   }
 
   // --- pass 2: returns ----------------------------------------------------
+  const MAINT_MARGIN = 0.005; // 0.5% maintenance margin (typical perp) for short-squeeze liq
   const ret = new Float64Array(n);
   const equity = new Float64Array(n).fill(opts.startEquity ?? 1);
   let turnoverSum = 0;
   let exposureBars = 0;
+  let squeezeLiqs = 0;
   let bust = false; // leverage honesty: a blown account stays blown
   const startEq = opts.startEquity ?? 1;
   for (let i = startI + 1; i <= endI; i++) {
@@ -141,7 +151,16 @@ export function runBacktestPrepared(
     const turnover = Math.abs(w[i - 1] - (i - 2 >= startI - 1 ? w[i - 2] : 0));
     turnoverSum += turnover;
     const fundingCost = held * fundingAtBar[i];
-    ret[i] = Math.max(-0.95, held * r - turnover * costRate - fundingCost);
+    // SHORT-SQUEEZE LIQUIDATION (honest tail): a leveraged short held into bar i is
+    // wiped if bar i's intraday HIGH ripped up past its liq distance vs the prior
+    // close. The short loses the full margin; we cap this bar's loss at the liq.
+    let dayRet = held * r - turnover * costRate - fundingCost;
+    if (held < -1 && inp.c[i - 1] > 0 && inp.h[i] > 0) {
+      const upWick = inp.h[i] / inp.c[i - 1] - 1;            // worst up-move within the bar
+      const liqUp = 1 / Math.abs(held) - MAINT_MARGIN;       // short liquidated at +this move
+      if (upWick >= liqUp) { dayRet = -(1 / Math.abs(held) - MAINT_MARGIN) - turnover * costRate; squeezeLiqs++; }
+    }
+    ret[i] = Math.max(-0.95, dayRet);
     equity[i] = equity[i - 1] * (1 + ret[i]);
     if (held !== 0) exposureBars++;
     if (equity[i] <= 0.05 * startEq) bust = true; // margin death — no resurrection
@@ -154,6 +173,7 @@ export function runBacktestPrepared(
     tr.ret = equity[tr.entryI] > 0 ? equity[Math.min(tr.exitI + 1, endI)] / equity[a > 0 ? a - 1 : 0] - 1 : 0;
   }
 
+  void squeezeLiqs; // honest squeeze-tail counter (priced into ret above)
   const metrics = computeMetrics(ret, equity, bars.t, trades, startI + 1, endI, opts.ppy, turnoverSum, exposureBars);
   return { ret, equity, weights: w, metrics, trades };
 }

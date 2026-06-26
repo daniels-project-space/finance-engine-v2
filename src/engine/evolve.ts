@@ -225,7 +225,7 @@ export function randomStrategy(seed: number): StrategyDoc {
   const trigger = genTrigger(rng, params);
   const entry: Expr = rng() < 0.6 ? { op: "and", a: genFilter(rng, params), b: trigger } : trigger;
   const exit = genExit(rng, params, entry);
-  const useShort = rng() < 0.35;
+  const useShort = rng() < 0.5; // EMPHASIZED: ~half of fresh GP strategies are short-capable, so the tournament genuinely hunts the short space (squeeze cost is now priced in the backtester)
   const tfRoll = rng();
   const doc: StrategyDoc = {
     name: `gp_${seed.toString(36)}`,
@@ -237,7 +237,7 @@ export function randomStrategy(seed: number): StrategyDoc {
     shortExit: useShort ? invertBool(exit) : undefined,
     params: capParams(params),
     risk: {
-      stopAtrMult: rng() < 0.7 ? Number((1.5 + rng() * 2.5).toFixed(1)) : undefined,
+      stopAtrMult: (useShort || rng() < 0.7) ? Number((1.5 + rng() * 2.5).toFixed(1)) : undefined, // short-capable strategies almost always carry an ATR stop (the thing that lets a short survive a squeeze)
       trailAtrMult: rng() < 0.4 ? Number((2 + rng() * 3).toFixed(1)) : undefined,
       volTargetAnnual: Number((0.15 + rng() * 0.45).toFixed(2)), // leverage appetite is part of the genome
       maxLeverage: Number((1 + rng() * 3).toFixed(1)),
