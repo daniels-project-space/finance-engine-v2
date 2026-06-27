@@ -78,6 +78,48 @@ export function generateCombination(seed: number): CombinationDoc {
   };
 }
 
+const SMA_ALL = [50, 80, 100, 120, 150, 200, 250];
+const CHOP_ALL = [40, 45, 50, 55, 60];
+
+/**
+ * BREED a child from a WINNING combination — local search around a proven structure
+ * instead of re-rolling at random. The combination lane found overlays at OOS Sharpe
+ * 1.2-1.3; `crossover` (breeding good parents) is the highest-win-rate GP recipe, so
+ * vary a passing combination's block params / gate / alloc / leverage to explore its
+ * neighbourhood. Keeps the mode/shape. Deterministic per seed.
+ */
+export function mutateCombination(parent: CombinationDoc, seed: number): CombinationDoc {
+  const rng = mulberry32(seed);
+  const child: CombinationDoc = JSON.parse(JSON.stringify(parent));
+  const nMut = 1 + (rng() < 0.4 ? 1 : 0);                       // 1-2 mutations
+  for (let k = 0; k < nMut; k++) {
+    const r = rng();
+    const bi = Math.floor(rng() * child.blocks.length) % child.blocks.length;
+    if (r < 0.35) {
+      child.blocks[bi].smaWin = pick(rng, SMA_ALL);              // shift a trend window
+    } else if (r < 0.6) {
+      child.blocks[bi].chopThr = Math.max(30, Math.min(70, child.blocks[bi].chopThr + pick(rng, [-10, -5, 5, 10])));
+    } else if (r < 0.8 && child.mode === "overlay") {
+      const baseSym = child.blocks[0].symbol;                   // re-roll the GATE (a different regime)
+      child.blocks[1] = rng() < 0.5
+        ? { symbol: baseSym, smaWin: pick(rng, [150, 200, 250]), chopThr: pick(rng, CHOP_ALL) }
+        : { symbol: pick(rng, MAJORS), smaWin: pick(rng, SMA_ALL), chopThr: pick(rng, CHOP_ALL) };
+    } else if (child.mode === "portfolio") {
+      const c = rng();
+      if (c < 0.4) child.alloc = pick(rng, ALLOCS);
+      else if (c < 0.7) child.leverage = pick(rng, [1, 1, 1.2, 1.35]);
+      else { const used = new Set(child.blocks.map((x) => x.symbol)); const avail = MAJORS.filter((s) => !used.has(s)); if (avail.length) child.blocks[bi].symbol = pick(rng, avail); }
+    } else {
+      child.blocks[0] = { ...child.blocks[0], symbol: pick(rng, MAJORS.slice(0, 4)) }; // swap the base coin
+    }
+  }
+  child.concWeights = child.mode === "portfolio" && child.alloc === "concentrate" ? child.blocks.map(() => 0.2 + rng() * 0.8) : undefined;
+  const tag = (seed >>> 0).toString(36).slice(-4);
+  child.name = `cmb_bred_${child.mode === "overlay" ? "ovl" : "port"}_${tag}`;
+  child.hypothesis = `Bred from a passing combination (local search around a Sharpe-1.2+ structure). ${(parent.hypothesis ?? "").slice(0, 150)}`;
+  return child;
+}
+
 /** validate: returns error strings; [] === valid. */
 export function validateCombination(doc: CombinationDoc): string[] {
   const e: string[] = [];

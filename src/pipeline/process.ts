@@ -14,7 +14,7 @@ import { SEED_LIBRARY } from "../engine/library";
 import { IMPORTED_LIBRARY } from "../engine/imports";
 import { evaluateSealed, runGauntlet, runGauntletXSection, runGauntletIv, runGauntletOc, runGauntletTrend, runGauntletCombination, setRiskObjective, setMonteCarlo, type GauntletReport } from "../engine/gauntlet";
 import { isCombination, type CombinationDoc } from "../engine/combination";
-import { generateCombination, validateCombination, combinationHash, combinationFamilyHash } from "../engine/combinationGen";
+import { generateCombination, mutateCombination, validateCombination, combinationHash, combinationFamilyHash } from "../engine/combinationGen";
 import { isXSection, alignUniverse, type XSectionDoc, type XAligned } from "../engine/xsection";
 import { generateXSection, validateXSection, xsectionHash, xsectionFamilyHash } from "../engine/xsectionGen";
 import { isIvSleeve, buildIvDaily, type IvSleeveDoc, type IvDaily } from "../engine/ivsleeve";
@@ -410,13 +410,26 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
   // Gated by cfg.combination.enabled (default off; flag-reversible).
   if (cfg.combination?.enabled) {
     const cbN = Math.max(1, Math.round((cfg.combination.perCycle ?? 4) * scale));
+    // REFINEMENT (breed-from-winners): half the cycle is BRED from combinations that
+    // already reached incubation/eligibility (local search around proven Sharpe-1.2+
+    // structures via mutateCombination); the rest stay fresh-random for exploration.
+    let winners: CombinationDoc[] = [];
+    try {
+      const pool = [
+        ...await cx.query(api.candidates.listByStage, { stage: "incubating", limit: 50 }),
+        ...await cx.query(api.candidates.listByStage, { stage: "eligible", limit: 50 }),
+      ];
+      winners = pool.map((c) => { try { const d = JSON.parse(c.dsl); return isCombination(d) ? d : null; } catch { return null; } }).filter((d): d is CombinationDoc => !!d);
+    } catch { /* no winners yet -> all fresh */ }
+    const nBred = winners.length ? Math.round(cbN * 0.5) : 0;
     for (let i = 0; i < cbN; i++) {
-      const cbdoc = generateCombination(seedBase + 600_000 + i);
-      const mech = cbdoc.mode === "overlay" ? "overlay" : "portfolio";
+      const cbdoc = i < nBred ? mutateCombination(winners[i % winners.length], seedBase + 650_000 + i) : generateCombination(seedBase + 600_000 + i);
+      if (validateCombination(cbdoc).length > 0) continue;
+      const mech = (i < nBred ? "bred_" : "") + (cbdoc.mode === "overlay" ? "overlay" : "portfolio");
       proposals.push({ doc: cbdoc, source: "combination", mechanism: mech, expectedComposite: globalMean, wild: false });
       summary.fresh++;
     }
-    log(`combination lane ON (${cbN}/cycle: portfolios + overlays of the chop-trend block)`);
+    log(`combination lane ON (${cbN}/cycle: ${nBred} bred from ${winners.length} winners + ${cbN - nBred} fresh)`);
   }
 
   // LLM lane. Anthropic goes through the subscription Claude CLI (NO API key),
