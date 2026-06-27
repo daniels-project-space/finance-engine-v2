@@ -377,8 +377,20 @@ export function recipeOf(source: string, mutation?: string): string {
   return "gp-op:other";
 }
 
+// A breedable DSL parent must have the standard expression-graph shape. Sleeve
+// families (kind: xsection/trendbeta/iv/oc/core4) have no longEntry/params and must
+// never enter the GP crossover/mutate path — guarding here prevents the crash even
+// if one slips past the pipeline's parent filter.
+function isBreedable(d: StrategyDoc | undefined | null): d is StrategyDoc {
+  return !!d && (d as { kind?: string }).kind == null && d.longEntry != null && d.longExit != null && d.params != null && typeof d.params === "object";
+}
+
 export function mutateStrategy(parent: StrategyDoc, seed: number, hint?: MutationHint, bandit?: BanditOpts): { doc: StrategyDoc; mutation: string } {
   const rng = mulberry32(seed);
+  // non-DSL sleeve docs (kind: xsection/trendbeta/iv/oc/core4) have no DSL expr
+  // graph or params and cannot be mutated by the GP operators — return as-is rather
+  // than throwing on undefined longEntry/params downstream.
+  if (!isBreedable(parent)) return { doc: clone(parent), mutation: "noop" };
   for (let attempt = 0; attempt < 12; attempt++) {
     const doc = clone(parent);
     doc.name = `mut_${seed.toString(36)}`;
@@ -552,9 +564,12 @@ export function mutateStrategy(parent: StrategyDoc, seed: number, hint?: Mutatio
 
 export function crossoverStrategies(a: StrategyDoc, b: StrategyDoc, seed: number): StrategyDoc {
   const rng = mulberry32(seed);
+  if (!isBreedable(a)) return isBreedable(b) ? clone(b) : clone(a); // non-DSL parent: can't cross, pass a breedable one through
+  if (!isBreedable(b)) return clone(a);                            // non-DSL donor: nothing to cross in, keep a
   for (let attempt = 0; attempt < 8; attempt++) {
     const doc = clone(a);
     doc.name = `xo_${seed.toString(36)}`;
+    if (doc.params == null || typeof doc.params !== "object") doc.params = {};
     // take entry from a, exit from b (or filter swap)
     const donor = clone(b);
     // merge params: rename donor params to avoid collisions

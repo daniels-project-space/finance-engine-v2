@@ -65,16 +65,31 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
     }
   } catch (e) { setIcBias(null); log(`IC-steering skipped: ${e instanceof Error ? e.message.slice(0, 80) : e}`); }
 
+  // The GP lane (crossoverStrategies / mutateStrategy) only knows how to breed plain
+  // DSL StrategyDocs. The sleeve families (xsection / trendbeta / iv / onchain /
+  // core4 portfolio) carry a `kind` and have NO DSL longEntry/params — they have
+  // their own dedicated generators on their own lanes. If one of them leaks into the
+  // breeding pool (they can rank top of the leaderboard by composite), crossover does
+  // `clone(donor.longExit)` on undefined (-> SyntaxError "undefined" is not valid
+  // JSON) or `doc.params[x_*] = …` on an undefined params (-> TypeError "Cannot set
+  // properties of undefined"). So we filter the parent pool to breedable DSL docs.
+  const isBreedableDsl = (c: { dsl?: string }): boolean => {
+    if (!c.dsl) return false;
+    try {
+      const d = JSON.parse(c.dsl) as { kind?: string; longEntry?: unknown; params?: unknown };
+      return !d.kind && d.longEntry != null && d.params != null && typeof d.params === "object";
+    } catch { return false; }
+  };
   const champion = await cx.query(api.candidates.champion, {});
   const leaders = await cx.query(api.candidates.leaderboard, { limit: 12 });
-  const parentRows = [...(champion ? [champion] : []), ...leaders.filter((l) => l._id !== champion?._id)];
+  const parentRows = [...(champion && isBreedableDsl(champion) ? [champion] : []), ...leaders.filter((l) => l._id !== champion?._id && isBreedableDsl(l))];
   // Until strategies survive, breed from the best of the fallen — near-misses
   // that reached walk-forward with a positive partial composite are the gene pool.
   if (parentRows.length < 6) {
     const board = await cx.query(api.candidates.tournament, { limit: 30 });
     const have = new Set(parentRows.map((p) => p._id));
     for (const row of board) {
-      if (have.has(row._id) || (row.composite ?? 0) <= 0.05) continue;
+      if (have.has(row._id) || (row.composite ?? 0) <= 0.05 || !isBreedableDsl(row)) continue;
       parentRows.push(row);
       have.add(row._id);
       if (parentRows.length >= 10) break;
