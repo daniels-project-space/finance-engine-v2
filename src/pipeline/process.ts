@@ -27,7 +27,8 @@ import { loadDvol, dvolMap, dvolCurrencyFor } from "../lib/deribit";
 import { realityCheck } from "../engine/rigor";
 import { buildBook, marginalContribution, bookQualifies, type Stream } from "../engine/book";
 import { perSleeveSignificant, marginalAdmits, bookLevelGate } from "../engine/bookGate";
-import { propose } from "../engine/llm";
+import { propose, proposeWithDeepSeek } from "../engine/llm";
+import { buildFailureReport, buildFixPrompt, runFixRound, ITERATE_DSL_GUIDE, type ReportLike, type LineageEntry } from "../engine/iterate";
 import { premiumOf } from "../engine/premia";
 import { setBayesTuning } from "../engine/tune";
 import { thompsonPick, antiThompsonPick, type Arm } from "../engine/bandit";
@@ -38,6 +39,103 @@ export type Log = (m: string) => void;
 
 export async function getAppConfig(cx: ConvexHttpClient): Promise<AppConfig> {
   return mergeConfig(await cx.query(api.pipeline.getConfig, { key: "app" }));
+}
+
+// ============================================================ ITERATION LOOP
+// Automates Daniel's propose -> diagnose -> fix process. Gauntlets a DSL doc
+// IN-PROCESS (no persistence), feeds its OWN GauntletReport into a targeted-fix LLM
+// prompt, repeats for K rounds capped by a token budget, and keeps the best of the
+// lineage. The winner is returned to the generator as one `iterated` proposal that
+// is then persisted + re-gauntleted normally. Gauntlet/floors/DSR math UNTOUCHED —
+// this calls the SAME runGauntlet (read-only) and only orchestrates the lineage.
+
+/** Gauntlet ONE DSL doc in-process and return its report (no Convex persistence).
+ *  Uses the IDENTICAL runGauntlet call (same floors + binding) as processCandidate. */
+async function gauntletDsl(cx: ConvexHttpClient, doc: StrategyDoc, cfg: AppConfig, sealTs: number, log: Log): Promise<GauntletReport | null> {
+  const tf = doc.tf ?? (cfg.tf as "1h");
+  const ppy = PPY[tf] ?? 8760;
+  let primary = await loadBars(cfg.primarySymbol, tf);
+  if (!primary || primary.t.length < ppy * 2.2) return null;
+  if (cfg.onchain?.enabled) primary = await attachOnchain(primary, cfg.primarySymbol);
+  const s4Subset = (cfg.crossSymbolSubset && cfg.crossSymbolSubset.length ? cfg.crossSymbolSubset : ["ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "AVAX/USDT", "LINK/USDT", "DOGE/USDT"]).filter((s) => s !== cfg.primarySymbol && cfg.universe.includes(s));
+  const others: Bars[] = [];
+  for (const sym of s4Subset) { const b = await loadBars(sym, tf); if (b && b.t.length > ppy * 1.7) others.push(b); }
+  const altTf = tf === "1h" ? "4h" : "1h";
+  const primaryAlt = await loadBars(cfg.primarySymbol, altTf);
+  if (primaryAlt && primaryAlt.t.length > (PPY[altTf] ?? 8760) * 1.7) others.push(primaryAlt);
+  const nTrials = Math.max(40, 10);
+  return runGauntlet({
+    doc, primary, others, sealTs, floors: cfg.floors, nTrialsTotal: nTrials, log,
+    binding: {
+      purgedWf: cfg.walkforward.purged,
+      pbo: { bind: cfg.shadowRigor.pbo.bind, max: cfg.shadowRigor.pbo.max, blocks: cfg.shadowRigor.pboBlocks },
+      regime: { bind: cfg.shadowRigor.regime.bind, minObs: cfg.shadowRigor.regime.minObs, minSharpe: cfg.shadowRigor.regime.minSharpe, maxPnlConcentration: cfg.shadowRigor.regime.maxPnlConcentration },
+    },
+  });
+}
+
+/** stage-depth score so "best of lineage" prefers the doc that reached deepest. */
+const STAGE_DEPTH_ITER: Record<string, number> = { "S2-train": 2, "S3-walkforward": 3, "S4-cross-symbol": 4, "S4-portfolio": 4.5, "S5-stats": 5, "S5b-stress": 5.5, "S5c-pbo": 5.7, "S6-sealed": 6 };
+function lineageScore(r: GauntletReport): number {
+  if (r.passed) return 100 + (r.metrics.composite ?? r.metrics.portOosSharpe ?? r.metrics.wfPooledSharpe ?? 0);
+  const depth = STAGE_DEPTH_ITER[r.failedStage ?? ""] ?? 1;
+  return depth + Math.max(0, (r.metrics.wfPooledSharpe ?? 0)) * 0.1;
+}
+
+export interface IterationResult { bestDoc: StrategyDoc; bestReport: GauntletReport; lineage: LineageEntry[]; rounds: number; tokensIn: number; tokensOut: number; improved: boolean }
+
+/**
+ * Run a propose->diagnose->fix lineage starting from `seed`. Each round: gauntlet
+ * the doc in-process, and if it failed, build its OWN failure report + ask the LLM
+ * for a targeted fix, then gauntlet the fix. Caps at maxRounds AND a token budget.
+ * Keeps the deepest/best doc of the lineage. CLI -> DeepSeek fallback per round.
+ */
+export async function iterateLineage(
+  cx: ConvexHttpClient, seed: StrategyDoc, cfg: AppConfig, sealTs: number, log: Log,
+  opts: { maxRounds: number; tokenBudget: number; openrouterKey?: string },
+): Promise<IterationResult | null> {
+  const lineage: LineageEntry[] = [];
+  let tokensIn = 0, tokensOut = 0;
+  let cur = seed;
+  let best: { doc: StrategyDoc; report: GauntletReport; score: number } | null = null;
+  let firstScore = -Infinity;
+
+  for (let round = 1; round <= opts.maxRounds; round++) {
+    const report = await gauntletDsl(cx, cur, cfg, sealTs, log);
+    if (!report) return best ? { bestDoc: best.doc, bestReport: best.report, lineage, rounds: round - 1, tokensIn, tokensOut, improved: best.score > firstScore } : null;
+    const score = lineageScore(report);
+    lineage.push({ round, name: cur.name, rationale: (cur.hypothesis ?? "").slice(0, 140), failedStage: report.failedStage, oosSharpe: report.metrics.wfPooledSharpe ?? report.metrics.portOosSharpe, dsr: report.metrics.dsr, passed: report.passed });
+    if (!best || score > best.score) best = { doc: cur, report, score };
+    if (round === 1) firstScore = score;
+    log(`  iterate round ${round}/${opts.maxRounds}: "${cur.name}" ${report.passed ? "PASSED" : `died ${report.failedStage}`} (OOS ${(report.metrics.wfPooledSharpe ?? 0).toFixed(2)}, DSR ${(report.metrics.dsr ?? 0).toFixed(2)}, score ${score.toFixed(2)})`);
+
+    if (report.passed) break;                          // a winner — stop the lineage
+    if (round === opts.maxRounds) break;               // out of rounds
+    if (tokensIn + tokensOut >= opts.tokenBudget) { log(`  iterate: token budget hit (${tokensIn + tokensOut})`); break; }
+
+    // build THIS candidate's structured failure report + the targeted-fix prompt
+    const failureReport = buildFailureReport(cur, report as ReportLike);
+    const prompt = buildFixPrompt(ITERATE_DSL_GUIDE, failureReport, lineage, round + 1, opts.maxRounds);
+    // CLI first; DeepSeek fallback (one proposal — the fix)
+    let fix: { doc: StrategyDoc; rationale: string } | null = null;
+    try {
+      const r = await runFixRound(prompt, cfg.iterate?.model ?? undefined);
+      tokensIn += r.usage.inputTokens; tokensOut += r.usage.outputTokens;
+      fix = r.proposal;
+    } catch (e) {
+      log(`  iterate CLI fix failed (${e instanceof Error ? e.message.slice(0, 80) : e}); trying deepseek`);
+      if (opts.openrouterKey) {
+        try { const ds = await proposeWithDeepSeek(opts.openrouterKey, [failureReport], "", "", 1, false, ""); tokensIn += ds.usage.inputTokens; tokensOut += ds.usage.outputTokens; fix = ds.proposals[0] ?? null; } catch { /* */ }
+      }
+    }
+    if (!fix) { log(`  iterate: no valid fix at round ${round}; stopping lineage`); break; }
+    fix.doc.hypothesis = `${fix.doc.hypothesis} [iterated r${round + 1}: fix for ${report.failedStage}] ${fix.rationale.slice(0, 90)}`;
+    fix.doc.name = `iter_${round + 1}_${(seed.name ?? "x").slice(0, 16)}`;
+    cur = fix.doc;
+  }
+
+  if (!best) return null;
+  return { bestDoc: best.doc, bestReport: best.report, lineage, rounds: lineage.length, tokensIn, tokensOut, improved: best.score > firstScore + 0.01 };
 }
 
 // ---------------------------------------------------------------- generation
@@ -346,6 +444,32 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
         summary.llm++;
       }
       log(`LLM ${result.usage.provider}/${result.usage.model}: ${result.proposals.length} proposals (metric $${result.usage.costUsd.toFixed(3)})`);
+
+      // ---- ITERATION LOOP (propose -> diagnose -> fix, Daniel-style) ----------
+      // When enabled, take the first LLM proposal(s) and ITERATE on their OWN
+      // gauntlet failures for K rounds, keeping the best of each lineage. The winner
+      // is added as one `iterated` proposal (persisted + re-gauntleted normally) so
+      // the bandit/ledger learns whether iteration produces survivors. Flag-gated,
+      // budget-capped; the gauntlet math is untouched (gauntletDsl reuses runGauntlet).
+      if (cfg.iterate?.enabled && allowCli && result.proposals.length) {
+        const sealTsIter = Date.parse(cfg.sealDate);
+        const maxRounds = Math.max(1, Math.min(6, cfg.iterate.maxRounds ?? 3));
+        const nLineages = Math.max(1, Math.min(cfg.iterate.lineagesPerCycle ?? 1, result.proposals.length));
+        const tokenBudget = cfg.iterate.tokenBudget ?? 300_000;
+        for (let li = 0; li < nLineages; li++) {
+          try {
+            const seedDoc = result.proposals[li].doc;
+            log(`iterate: lineage ${li + 1}/${nLineages} from "${seedDoc.name}" (≤${maxRounds} rounds)`);
+            const it = await iterateLineage(cx, seedDoc, cfg, sealTsIter, log, { maxRounds, tokenBudget, openrouterKey: process.env.OPENROUTER_API_KEY });
+            if (it && it.rounds > 1) {
+              it.bestDoc.hypothesis = `${it.bestDoc.hypothesis} [iterated ${it.rounds}r, ${it.improved ? "improved" : "explored"}]`;
+              proposals.push({ doc: it.bestDoc, source: "llm", mechanism: "iterated", expectedComposite: globalMean, wild: false });
+              summary.llm++;
+              log(`iterate: lineage done — ${it.rounds} rounds, best ${it.bestReport.passed ? "PASSED" : "died " + it.bestReport.failedStage} (OOS ${(it.bestReport.metrics.wfPooledSharpe ?? 0).toFixed(2)}), ${it.improved ? "IMPROVED over round 1" : "no improvement"}, ~${it.tokensIn + it.tokensOut} tokens`);
+            }
+          } catch (e) { log(`iterate lineage ${li + 1} skipped: ${e instanceof Error ? e.message.slice(0, 100) : e}`); }
+        }
+      }
     }
   } else summary.llmSkipped = "daily budget exhausted";
 

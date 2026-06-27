@@ -44,7 +44,7 @@ export interface LlmUsage {
 // a valid call. Override with EVOLUTION_LLM_TIMEOUT_MS.
 const CLI_TIMEOUT_MS = Number(process.env.EVOLUTION_LLM_TIMEOUT_MS ?? 12 * 60 * 1000);
 
-const DSL_GUIDE = `You design crypto perp trading strategies as JSON expression graphs ("DSL"). NO code — pure JSON.
+export const DSL_GUIDE = `You design crypto perp trading strategies as JSON expression graphs ("DSL"). NO code — pure JSON.
 
 Expr grammar (recursive):
  {"op":"price","field":"open|high|low|close|volume"}

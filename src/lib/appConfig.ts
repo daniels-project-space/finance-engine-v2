@@ -26,6 +26,11 @@ export interface AppConfig {
    *  regime overlays) judged by the gauntlet as ONE unit — the COMBINED OOS stream
    *  through the SAME floors/DSR/bootstrap. The #1 capability gap. */
   combination?: { enabled: boolean; perCycle?: number };
+  /** ITERATION loop: automate propose -> diagnose -> fix. Take the LLM's proposal,
+   *  gauntlet it, feed its OWN structured failure report back, ask for a TARGETED
+   *  fix, repeat for maxRounds (budget-capped). Replaces one-shot ideation with the
+   *  stateful per-lineage loop Daniel does. The 2nd-biggest capability gap. */
+  iterate?: { enabled: boolean; maxRounds?: number; lineagesPerCycle?: number; tokenBudget?: number; model?: string };
   /** ON-CHAIN feature inputs (Coin Metrics community + DefiLlama, daily BTC/ETH).
    *  When enabled, on-chain features are attached to the primary bars so strategies
    *  can use mvrv/activeaddr/txcnt/nvt/exnetflow/stablesupply DSL ops. */
@@ -167,6 +172,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   trendbeta: { enabled: false, perCycle: 3 },
   // COMBINATION lane DEFAULT OFF in code; shipped ON via the live override (reversible).
   combination: { enabled: false, perCycle: 4 },
+  // ITERATION loop DEFAULT OFF in code; shipped ON via the live override (reversible).
+  iterate: { enabled: false, maxRounds: 3, lineagesPerCycle: 1, tokenBudget: 300_000 },
   // ON-CHAIN features DEFAULT OFF in code; shipped ON via the live override.
   onchain: { enabled: false },
   primarySymbol: "BTC/USDT",
