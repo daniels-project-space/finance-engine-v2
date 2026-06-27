@@ -38,6 +38,15 @@ export interface AppConfig {
    *  ENTIRELY from blocks (base + gates), (c) the LLM prompt lists the blocks by name.
    *  Generation-side only — the gauntlet is untouched. The 3rd capability gap. */
   toolkit?: { enabled: boolean; composeShare?: number };
+  /** RISK-MANAGED GENERATION OBJECTIVE (capability #4): tilt the composite RANKING
+   *  score toward lower-drawdown shapes so generation PREFERS and breeds from them.
+   *  Pure RANKING tilt — applied to metrics.composite AFTER every gauntlet pass/fail
+   *  decision is already made; it NEVER changes which strategies pass. Among honest
+   *  survivors, a lower |maxDD| (higher Calmar) gets a bounded multiplicative bonus,
+   *  a worse one a bounded penalty. targetDD is the |maxDD| (e.g. 0.30 = 30%)
+   *  that scores neutral (factor 1); weight scales the tilt; the factor is clamped to
+   *  [floor, ceil] so a big Sharpe edge still dominates (tilt, not takeover). */
+  riskObjective?: { enabled: boolean; targetDD?: number; weight?: number; floor?: number; ceil?: number };
   /** ON-CHAIN feature inputs (Coin Metrics community + DefiLlama, daily BTC/ETH).
    *  When enabled, on-chain features are attached to the primary bars so strategies
    *  can use mvrv/activeaddr/txcnt/nvt/exnetflow/stablesupply DSL ops. */
@@ -183,6 +192,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   iterate: { enabled: false, maxRounds: 3, lineagesPerCycle: 1, tokenBudget: 300_000 },
   // TOOLKIT MACROS DEFAULT OFF in code; shipped ON via the live override (reversible).
   toolkit: { enabled: false, composeShare: 0.2 },
+  // RISK-MANAGED GENERATION OBJECTIVE DEFAULT OFF in code; shipped ON via the live override (reversible).
+  riskObjective: { enabled: false, targetDD: 0.30, weight: 0.5, floor: 0.7, ceil: 1.15 },
   // ON-CHAIN features DEFAULT OFF in code; shipped ON via the live override.
   onchain: { enabled: false },
   primarySymbol: "BTC/USDT",
