@@ -99,7 +99,10 @@ async function main() {
   const hT: number[] = [], hC: number[] = [];
   const t0 = bt.t[0];
   for (let i = 0; i < rawFull.t.length; i++) { if (rawFull.t[i] >= t0) { hT.push(rawFull.t[i]); hC.push(rawFull.price[i]); } }
-  const btcHodl = downsampleCurve(hT, hC, 420);
+  // btcHodl uses {t, c} (price) — the card schema + ChartWithBenchmarks read .c,
+  // NOT .eq (that mismatch made the page throw on s.btcHodl.c.length).
+  const hods = downsampleCurve(hT, hC, 420);
+  const btcHodl = { t: hods.t, c: hods.eq };
 
   console.log(`\n=== 70/30 BLEND — since-2020 backtest (btc_full.json) ===`);
   console.log(`window ${fmt(bt.t[0])} .. ${fmt(bt.t[bt.t.length - 1])}  (${(bt.ret.length / 365).toFixed(2)}y)`);
