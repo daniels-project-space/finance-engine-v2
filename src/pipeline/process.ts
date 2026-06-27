@@ -230,7 +230,10 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
   // Soft dead-end suppression from the failure memory: a recipe that keeps
   // dying at the sealed holdout / cross-symbol stage gets its Beta failure
   // param inflated (collapses its odds without zeroing them).
-  const recipeArms: Arm[] = MUTATION_OPS.map((op) => {
+  // TOOLKIT lane: the `graft_macro` operator (graft a proven block onto an entry)
+  // is only an eligible bandit arm when the toolkit is enabled (flag-reversible).
+  const opsForBandit = MUTATION_OPS.filter((op) => op !== "graft_macro" || cfg.toolkit?.enabled === true);
+  const recipeArms: Arm[] = opsForBandit.map((op) => {
     const key = `gp-op:${op}`;
     const r = ledgerByMech.get(key);
     const suppression = r ? 2 * r.failedSealed + r.failedS4 : 0;
@@ -325,7 +328,7 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
     if (mechFirst) {
       // MECHANISM-FIRST: instantiate/vary/combine a coherent template (the rebuilt
       // quant-style discovery). mechanism key carries the template for attribution.
-      const { doc, mechanism } = mechanismFirstStrategy(seedBase + 100_000 + i);
+      const { doc, mechanism } = mechanismFirstStrategy(seedBase + 100_000 + i, 0.15, cfg.toolkit?.enabled ? (cfg.toolkit.composeShare ?? 0.2) : 0);
       proposals.push({ doc, source: "gp", mechanism, expectedComposite: globalMean, wild: false });
     } else {
       proposals.push({ doc: randomStrategy(seedBase + 100_000 + i), source: "gp", mechanism: "fresh", expectedComposite: globalMean, wild: false });

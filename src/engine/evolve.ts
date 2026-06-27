@@ -6,6 +6,7 @@
 import { mulberry32 } from "./stats";
 import { validateStrategy } from "./dsl";
 import { instantiateMechanism, combineMechanisms, MECHANISMS } from "./mechanisms";
+import { pickGateMacro, composeFromToolkit } from "./toolkit";
 import type { Expr, ParamSpec, PriceField, StrategyDoc } from "./types";
 
 type Rng = () => number;
@@ -258,7 +259,7 @@ function complexityOf(doc: StrategyDoc): { nodes: number; params: number } {
  * mechanism key for bandit/ledger attribution. This is how Daniel (and quants)
  * build strategies — vs the old bottom-up random-tree salads.
  */
-export function mechanismFirstStrategy(seed: number, freeFormShare = 0.15): { doc: StrategyDoc; mechanism: string } {
+export function mechanismFirstStrategy(seed: number, freeFormShare = 0.15, toolkitShare = 0): { doc: StrategyDoc; mechanism: string } {
   const rng = mulberry32(seed);
   for (let attempt = 0; attempt < 6; attempt++) {
     let r: { doc: StrategyDoc; mechanism: string };
@@ -266,7 +267,11 @@ export function mechanismFirstStrategy(seed: number, freeFormShare = 0.15): { do
     if (roll < freeFormShare) {
       // small free-form exploration share (the old GP), but still simplicity-checked
       r = { doc: randomStrategy(seed + attempt * 13 + 1), mechanism: "fresh_freeform" };
-    } else if (roll < freeFormShare + 0.18) {
+    } else if (roll < freeFormShare + toolkitShare) {
+      // TOOLKIT compose: a strategy built ENTIRELY from proven blocks (base + gates)
+      const t = composeFromToolkit(seed + attempt * 31 + 7);
+      r = { doc: t.doc, mechanism: `toolkit:${t.macros.join("+")}` };
+    } else if (roll < freeFormShare + toolkitShare + 0.18) {
       r = combineMechanisms(rng);                   // regime-switch combination
     } else {
       r = instantiateMechanism(rng);                // the bulk: instantiate a template
@@ -341,14 +346,15 @@ export type MutationHint = "risk" | "consistency" | "generalize" | "sharpe" | un
 // The base mutation-operator families the bandit chooses among. Keys match the
 // "gp-op:<op>" recipe keys in the knowledge ledger (without the prefix here).
 export const MUTATION_OPS = [
-  "op_swap", "param_shift", "add_filter", "remove_filter", "new_exit", "toggle_shorts", "risk_overlay",
+  "op_swap", "param_shift", "add_filter", "remove_filter", "new_exit", "toggle_shorts", "risk_overlay", "graft_macro",
 ] as const;
 export type MutationOp = typeof MUTATION_OPS[number];
 
 // Map a chosen operator family onto a `kind` value in the legacy threshold
-// ladder, so the existing branch logic runs unchanged.
+// ladder, so the existing branch logic runs unchanged. graft_macro is handled by
+// its own isolated branch (it bypasses this ladder), so its value here is unused.
 const OP_KIND: Record<MutationOp, number> = {
-  op_swap: 0.1, param_shift: 0.3, add_filter: 0.47, remove_filter: 0.6, new_exit: 0.72, toggle_shorts: 0.83, risk_overlay: 0.95,
+  op_swap: 0.1, param_shift: 0.3, add_filter: 0.47, remove_filter: 0.6, new_exit: 0.72, toggle_shorts: 0.83, risk_overlay: 0.95, graft_macro: 0.5,
 };
 
 export interface BanditOpts {
@@ -368,6 +374,7 @@ export function recipeOf(source: string, mutation?: string): string {
   if (m.startsWith("op_swap")) return "gp-op:op_swap";
   if (m.startsWith("param_shift")) return "gp-op:param_shift";
   if (m === "add_filter") return "gp-op:add_filter";
+  if (m.startsWith("graft_macro")) return "gp-op:graft_macro";
   if (m === "chop_gate") return "gp-op:chop_gate";
   if (m === "remove_filter") return "gp-op:remove_filter";
   if (m === "new_exit") return "gp-op:new_exit";
@@ -460,6 +467,28 @@ export function mutateStrategy(parent: StrategyDoc, seed: number, hint?: Mutatio
         if (validateStrategy(folded).length === 0) return { doc: folded, mutation };
         continue;
       }
+    }
+
+    // GRAFT MACRO: graft a PROVEN building block from the toolkit onto the entry
+    // (the audit's "stop rediscovering blocks node-by-node" fix). Isolated branch —
+    // bypasses the legacy ladder entirely so no existing thresholds shift. A gate
+    // macro is AND-ed onto longEntry; the short side gets the same gate if the macro
+    // is regime-symmetric (trend-quality/vol-calm/range) or its inverse if it's
+    // directional (trend-confirm/momentum/funding). Bandit-selectable + ledger-attributed.
+    if (bandit?.forcedOp === "graft_macro") {
+      const regime = rng() < 0.5 ? "trend" : "any";
+      const macro = pickGateMacro(rng, regime);
+      const mk = (min: number, max: number, def: number, int = true): Expr => freshParam(doc.params, min, max, def, int);
+      const gate = macro.build(rng, mk);
+      doc.longEntry = { op: "and", a: gate, b: doc.longEntry };
+      if (doc.shortEntry) doc.shortEntry = { op: "and", a: macro.symmetric ? clone(gate) : invertBool(gate), b: doc.shortEntry };
+      mutation = `graft_macro:${macro.key}`;
+      const all = doc.params;
+      doc.params = capParams(all);
+      const folded = foldMissingParams(doc, all);
+      folded.hypothesis = `${parent.hypothesis.slice(0, 130)} [grafted: ${macro.key}]`;
+      if (validateStrategy(folded).length === 0) return { doc: folded, mutation };
+      continue;
     }
 
     // bandit-driven operator choice: when a recipe is forced, snap `kind` to

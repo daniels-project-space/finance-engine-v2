@@ -31,6 +31,13 @@ export interface AppConfig {
    *  fix, repeat for maxRounds (budget-capped). Replaces one-shot ideation with the
    *  stateful per-lineage loop Daniel does. The 2nd-biggest capability gap. */
   iterate?: { enabled: boolean; maxRounds?: number; lineagesPerCycle?: number; tokenBudget?: number; model?: string };
+  /** TOOLKIT MACROS: a shared catalog of proven DSL building blocks (trend-confirm,
+   *  chop/trend-quality gate, vol-calm gate, breakout, momentum, funding tilt). When
+   *  enabled: (a) the GP gets a `graft_macro` operator that grafts a proven block onto
+   *  an entry, (b) a `composeShare` of the mechanism-first lane builds strategies
+   *  ENTIRELY from blocks (base + gates), (c) the LLM prompt lists the blocks by name.
+   *  Generation-side only — the gauntlet is untouched. The 3rd capability gap. */
+  toolkit?: { enabled: boolean; composeShare?: number };
   /** ON-CHAIN feature inputs (Coin Metrics community + DefiLlama, daily BTC/ETH).
    *  When enabled, on-chain features are attached to the primary bars so strategies
    *  can use mvrv/activeaddr/txcnt/nvt/exnetflow/stablesupply DSL ops. */
@@ -174,6 +181,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   combination: { enabled: false, perCycle: 4 },
   // ITERATION loop DEFAULT OFF in code; shipped ON via the live override (reversible).
   iterate: { enabled: false, maxRounds: 3, lineagesPerCycle: 1, tokenBudget: 300_000 },
+  // TOOLKIT MACROS DEFAULT OFF in code; shipped ON via the live override (reversible).
+  toolkit: { enabled: false, composeShare: 0.2 },
   // ON-CHAIN features DEFAULT OFF in code; shipped ON via the live override.
   onchain: { enabled: false },
   primarySymbol: "BTC/USDT",

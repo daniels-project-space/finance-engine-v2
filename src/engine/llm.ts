@@ -22,6 +22,7 @@ import { dirname, join } from "node:path";
 import { validateStrategy } from "./dsl";
 import { EVOLUTION_MODEL, priceFor } from "./model";
 import { premiumCatalogText, PREMIUM_FAMILIES } from "./premia";
+import { MACRO_CATALOG_TEXT } from "./toolkit";
 import type { StrategyDoc } from "./types";
 
 const require = createRequire(import.meta.url);
@@ -127,6 +128,8 @@ Proven mechanism archetypes in the library (build on / vary / COMBINE these, or 
  - vol-regime trend (trade only when realized-vol percentile is moderate, not extreme)
  - donchian breakout + trend filter; funding-carry tilt (long when funding low/negative)
  - regime-SWITCH (trend-follow when trending, mean-revert in range) — one regime-conditional strategy
+
+${MACRO_CATALOG_TEXT}
 
 Propose ${nProposals} strategies. Each = ONE coherent mechanism (NOT a kitchen-sink of indicators), with the structural hypothesis + the MINIMAL implementation. STRONGLY prefer few params/nodes. Diversify the mechanisms (don't submit ${nProposals} trend variants). Use the regime/chop ops (adx, choppiness, effratio), volume confirmation, and the trailing stop where the mechanism calls for them.`;
 }
