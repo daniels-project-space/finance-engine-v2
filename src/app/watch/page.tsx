@@ -128,10 +128,10 @@ function McPanel({ mc }: { mc: Mc }) {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-px rounded-lg overflow-hidden border border-edge/60 bg-edge/30">
         <div className="bg-ink p-4">
           <div className="hud mb-2">worst drawdown</div>
-          <div className="num text-[22px] leading-none" style={{ color: ddCol(mc.ddP5) }}>{pct(mc.ddP5, 0)}</div>
-          <div className="num text-[9px] text-dim mt-1.5">1-in-20 bad case</div>
-          <div className="num text-[10px] text-mid mt-2.5">median {pct(mc.ddP50, 0)} · mild {pct(mc.ddP95, 0)}</div>
-          <div className="num text-[9px] text-faint mt-1">historical {pct(mc.histDD, 0)}</div>
+          <div className="num text-[22px] leading-none" style={{ color: ddCol(mc.histDD) }}>{pct(mc.histDD, 0)}</div>
+          <div className="num text-[9px] text-dim mt-1.5">actual · since 2020</div>
+          <div className="num text-[10px] text-mid mt-2.5">stress test: typical {pct(mc.ddP50, 0)}</div>
+          <div className="num text-[10px] text-mid mt-1">1-in-20 bad case {pct(mc.ddP5, 0)}</div>
         </div>
         <div className="bg-ink p-4">
           <div className="hud mb-2">terminal · growth of $1</div>
