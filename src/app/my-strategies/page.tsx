@@ -18,7 +18,7 @@ interface Strat {
 }
 
 const TAG_TONE: Record<string, string> = {
-  flagship: "blue-glow-text", "best risk-adjusted": "text-up", "beats BTC at lower risk": "text-accent", aggressive: "text-down",
+  "your strategy": "blue-glow-text", flagship: "blue-glow-text", "best risk-adjusted": "text-up", "beats BTC at lower risk": "text-accent", aggressive: "text-down",
 };
 
 export default function MyStrategiesPage() {

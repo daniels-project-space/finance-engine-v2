@@ -15,6 +15,8 @@ import { generateIvSleeve, validateIvSleeve } from "../src/engine/ivsleeveGen";
 import { generateOcSleeve, validateOcSleeve } from "../src/engine/onchainsleeveGen";
 import { buildOcDaily, backtestOc, isOcSleeve } from "../src/engine/onchainsleeve";
 import { buildIvDaily, backtestIv, isIvSleeve } from "../src/engine/ivsleeve";
+import { buildBlendDaily, backtestBlend, isBlendSleeve, type BlendSleeveDoc } from "../src/engine/blendsleeve";
+import { validateBlend } from "../src/engine/blendsleeveGen";
 
 let failures = 0;
 function check(name: string, cond: boolean, info = "") {
@@ -324,6 +326,29 @@ async function main() {
   const ocSbt1 = backtestOc({ ...ocDoc, symbol: "BTC/USDT", signal: "mvrv_cheap" }, ocDaily, { zWin: ocDoc.zWin, thresh: ocDoc.thresh }, { startI: 0, endI: ocsMid });
   let ocsDiff = 0; for (let i = ocDoc.zWin + 2; i <= ocsMid; i++) ocsDiff = Math.max(ocsDiff, Math.abs(ocSbt1.ret[i] - ocSbt2.ret[i]));
   check("on-chain-sleeve NO look-ahead (future feature corruption doesn't change past)", ocsDiff < 1e-9, `maxDiff=${ocsDiff.toExponential(2)}`);
+
+
+  console.log("— 70/30 on-chain+trend blend sleeve —");
+  // synthetic BTC 1d bars with an mvrv series attached (so NUPL = 1-1/MVRV builds)
+  const blendBars = ((): Bars => { const b = synthBars(900, 21, 0.0005); const day = b.t.map((t) => Math.floor(t / 86400000) * 86400000); const mv = b.t.map((_, i) => 1.6 + Math.sin(i / 60)); return { ...b, symbol: "BTC/USDT", tf: "1d", t: day, fundingT: [], fundingR: [], ocMvrv: mv } as Bars; })();
+  const blendDoc: BlendSleeveDoc = { name: "smoke_blend", kind: "blend", hypothesis: "x", symbol: "BTC/USDT", tf: "1d", wOnchain: 0.7, smaWin: 100, nuplBuy: 0.0, nuplSell: 0.45, maWin: 200, dcaCapDays: 90, params: {}, risk: { volTargetAnnual: 1, maxLeverage: 1 } };
+  check("blend doc is recognized + valid", isBlendSleeve(blendDoc) && validateBlend(blendDoc).length === 0, JSON.stringify(validateBlend(blendDoc)));
+  const blendS = buildBlendDaily(blendBars, blendDoc.maWin);
+  check("blend daily series builds (NUPL + 200d MA aligned)", blendS.t.length > 700 && blendS.nupl.length === blendS.t.length && blendS.ma.length === blendS.t.length, `n=${blendS.t.length}`);
+  const blendBt = backtestBlend(blendDoc, blendS);
+  check("blend backtest runs + each leg long-flat (exposure in [0,1])", Number.isFinite(blendBt.ret[blendBt.ret.length - 1]) && blendBt.expA >= 0 && blendBt.expA <= 1 && blendBt.expB >= 0 && blendBt.expB <= 1, `expA=${(blendBt.expA * 100).toFixed(0)}% expB=${(blendBt.expB * 100).toFixed(0)}%`);
+  // the blended return is exactly wOnchain*legA + (1-wOnchain)*legB (combine-at-return)
+  let combDiff = 0; for (let i = 0; i < blendBt.ret.length; i++) combDiff = Math.max(combDiff, Math.abs(blendBt.ret[i] - (0.7 * blendBt.retA[i] + 0.3 * blendBt.retB[i])));
+  check("blend combines legs at return level (0.7A + 0.3B)", combDiff < 1e-12, `maxDiff=${combDiff.toExponential(2)}`);
+  // LOOK-AHEAD PROBE: corrupting FUTURE MVRV must not change PAST blended returns
+  const blMid = Math.floor(blendBars.t.length * 0.5);
+  const blendBars2: Bars = { ...blendBars, ocMvrv: blendBars.ocMvrv!.slice(), c: blendBars.c.slice() };
+  for (let i = blMid + 1; i < blendBars2.t.length; i++) { blendBars2.ocMvrv![i] = 99; blendBars2.c[i] = blendBars2.c[i] * 5; }
+  const blendS2 = buildBlendDaily(blendBars2, blendDoc.maWin);
+  const bt1 = backtestBlend(blendDoc, blendS, { startI: 0, endI: blMid });
+  const bt2 = backtestBlend(blendDoc, blendS2, { startI: 0, endI: blMid });
+  let blDiff = 0; const m1 = Math.min(bt1.ret.length, bt2.ret.length); for (let i = 0; i < m1; i++) blDiff = Math.max(blDiff, Math.abs(bt1.ret[i] - bt2.ret[i]));
+  check("blend NO look-ahead (future MVRV/price corruption doesn't change past)", blDiff < 1e-9, `maxDiff=${blDiff.toExponential(2)}`);
 
   console.log(failures === 0 ? "\nALL SMOKE TESTS PASSED" : `\n${failures} FAILURES`);
   process.exit(failures === 0 ? 0 : 1);

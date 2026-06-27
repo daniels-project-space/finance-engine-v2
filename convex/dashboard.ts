@@ -260,7 +260,7 @@ export const paperBook = query({
     const stages = ["incubating", "eligible", "champion"];
     const sleeves: { id: string; name: string; source: string; family: string; forwardSeed: boolean; userStrategy?: boolean; flagship?: boolean; lastTs?: number; leverage?: number; legs?: { symbol: string; long: boolean }[]; startEq: number; equity: number; peak: number; days: number; ret: number; sharpe: number | null; maxDD: number; halted: boolean; bars: number; spark: number[]; backtestTotal?: number; backtestHodlTotal?: number; vsHodl?: { trendCagr: number; trendMaxDD: number; trendCalmar: number; hodlCagr: number; hodlMaxDD: number; hodlCalmar: number } }[] = [];
     const PPY = 8760; // hourly paper steps
-    const fam = (s: string) => s === "xsection" ? "Cross-sectional" : s === "ivsleeve" ? "IV-timing" : s === "onchain" ? "On-chain" : s === "trendbeta" ? "Trend-beta" : s === "regime" ? "Regime / chop" : "DSL";
+    const fam = (s: string) => s === "xsection" ? "Cross-sectional" : s === "ivsleeve" ? "IV-timing" : s === "onchain" ? "On-chain" : s === "trendbeta" ? "Trend-beta" : s === "blend" ? "Blend (on-chain + trend)" : s === "regime" ? "Regime / chop" : "DSL";
     // collect all snapshots keyed by timestamp for the combined book curve
     const perTsRet = new Map<number, { sum: number; n: number }>();
 

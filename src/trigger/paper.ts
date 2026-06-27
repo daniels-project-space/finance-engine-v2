@@ -6,13 +6,14 @@
 import { logger, schedules } from "@trigger.dev/sdk";
 import { api, convex } from "../lib/convexClient";
 import { mergeConfig } from "../lib/appConfig";
-import { loadBars } from "../lib/data";
+import { loadBars, attachOnchain } from "../lib/data";
 import { computeSignals, toArrays } from "../engine/compile";
 import { DEFAULT_FEE_BPS, PPY, SLIP_BPS, type Bars, type StrategyDoc } from "../engine/types";
 import { isIvSleeve, buildIvDaily, type IvSleeveDoc } from "../engine/ivsleeve";
 import { isOcSleeve } from "../engine/onchainsleeve";
 import { isXSection } from "../engine/xsection";
 import { isTrendBeta, buildTrendDaily, type TrendBetaDoc } from "../engine/trendbeta";
+import { isBlendSleeve, blendTargetNow, type BlendSleeveDoc } from "../engine/blendsleeve";
 import { loadDvol, dvolMap, dvolCurrencyFor } from "../lib/deribit";
 import { sendTelegram } from "../lib/telegram";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -141,6 +142,47 @@ async function trendForwardStep(
   }
   const newPositions = [{ symbol: doc.symbol, weight: Math.abs(wTo - prevWeight) > 0.02 ? wTo : prevWeight, entryPrice: closeI }];
   return { stepTs: S.t[i], portRet, newPositions, trades };
+}
+
+// BLEND forward step: the 70/30 on-chain-overlay / BTC-trend blend trades ONE coin
+// (BTC) at the COMBINED target weight = wOnchain*legA + (1-wOnchain)*legB, computed
+// point-in-time from the latest CLOSED day (NUPL = 1-1/MVRV with attached on-chain +
+// 200d-MA confirm for Leg A; close>SMA(smaWin) for Leg B). Both legs are long-flat;
+// the blend weight is in [0,1] (no leverage). Mark-to-market + fee/slip on the weight
+// change + funding while exposed feed the SAME paper P&L accounting as every sleeve.
+async function blendForwardStep(
+  doc: BlendSleeveDoc, equity: number,
+  prevWeight: number, prevPrice: number, lastStepTs: number | undefined,
+): Promise<ForwardStep | null> {
+  const bars0 = await loadBars(doc.symbol, "1d");
+  if (!bars0) return null;
+  const bars = await attachOnchain(bars0, doc.symbol);   // NUPL needs MVRV attached
+  const t = blendTargetNow(doc, bars);
+  if (!t) return null;
+  const SLIP_D: Record<string, number> = { "BTC/USDT": 1.5, "ETH/USDT": 2, "SOL/USDT": 3 };
+  const slip = (SLIP_D[doc.symbol] ?? 3) / 1e4;
+  const closeI = t.lastClose;
+  // mark-to-market: prev weight earned the move into the latest closed day
+  let portRet = 0;
+  if (prevWeight !== 0 && prevPrice > 0) portRet += prevWeight * (closeI / prevPrice - 1);
+  // funding while exposed since last step (point-in-time)
+  if (bars.fundingT && bars.fundingR && lastStepTs) {
+    for (let fi = bars.fundingT.length - 1; fi >= 0; fi--) {
+      const ft = bars.fundingT[fi];
+      if (ft <= lastStepTs) break;
+      if (ft <= Date.now()) portRet -= prevWeight * bars.fundingR[fi];
+    }
+  }
+  const wTo = t.weight;                                   // 0.7*legA + 0.3*legB, in [0,1]
+  const trades: ForwardStep["trades"] = [];
+  if (Math.abs(wTo - prevWeight) > 0.02) {
+    const side = Math.sign(wTo - prevWeight);
+    const tradeCost = Math.abs(wTo - prevWeight) * (DEFAULT_FEE_BPS / 1e4 + slip);
+    portRet -= tradeCost;
+    trades.push({ symbol: doc.symbol, ts: t.lastTs, weightFrom: prevWeight, weightTo: wTo, price: closeI, fillPrice: closeI * (1 + side * slip), costUsd: tradeCost * equity, note: `blend:A${(doc.wOnchain * 100).toFixed(0)}/B${((1 - doc.wOnchain) * 100).toFixed(0)} legA${t.legAW.toFixed(2)} legB${t.legBW.toFixed(2)}` });
+  }
+  const newPositions = [{ symbol: doc.symbol, weight: Math.abs(wTo - prevWeight) > 0.02 ? wTo : prevWeight, entryPrice: closeI }];
+  return { stepTs: t.lastTs, portRet, newPositions, trades };
 }
 
 // ============================================================ CORE-4 PORTFOLIO
@@ -368,6 +410,14 @@ export const paperStep = schedules.task({
           const cur = posBySym.get(rawDoc.symbol);
           const step = await trendForwardStep(rawDoc, params, acct.equity, cur?.weight ?? 0, cur?.entryPrice ?? 0, acct.lastStepTs);
           if (!step) { logger.log(`trend sleeve "${cand.name}": bars unavailable, skipped`); continue; }
+          stepTs = step.stepTs; portRet = step.portRet; newPositions = step.newPositions; trades = step.trades;
+          for (const t of trades) costUsd += t.costUsd;
+        } else if (isBlendSleeve(rawDoc)) {
+          // 70/30 on-chain-overlay / BTC-trend blend: ONE coin at the combined
+          // point-in-time blend weight (each leg computed independently, combined).
+          const cur = posBySym.get(rawDoc.symbol);
+          const step = await blendForwardStep(rawDoc, acct.equity, cur?.weight ?? 0, cur?.entryPrice ?? 0, acct.lastStepTs);
+          if (!step) { logger.log(`blend sleeve "${cand.name}": bars/on-chain unavailable, skipped`); continue; }
           stepTs = step.stepTs; portRet = step.portRet; newPositions = step.newPositions; trades = step.trades;
           for (const t of trades) costUsd += t.costUsd;
         } else if (isOcSleeve(rawDoc) || isXSection(rawDoc)) {
