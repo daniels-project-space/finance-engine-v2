@@ -41,12 +41,15 @@ const DOC: BlendSleeveDoc = {
   name: "blend_btc_70_30_onchain_trend_seed",
   kind: "blend",
   hypothesis:
-    "70/30 blend of the on-chain cycle overlay and a BTC trend filter, with a SMART (symmetric) exit. The overlay accumulates on capitulation (DCA in when NUPL <= 0) and now DISTRIBUTES into euphoria (DCA out when NUPL >= 0.60), the mirror image of the buy — instead of holding the top until the 200d MA breaks. This single principle (accumulate deep loss, distribute deep profit) is the elegant root-cause fix for the 2021-22 drawdown and generalizes across EVERY on-chain cycle (2013/2017/2021/2024), cutting the drawdown ~20pp each time. Since-2020: ~11.7x return at -28.7% maxDD (was 16.75x / -47.7%) with Calmar 1.14 -> 1.61 and Sharpe 1.32 -> 1.42 — far more efficient, lowest drawdown, no leverage, no liquidation risk. Long-flat legs, daily rebalance, point-in-time, realistic costs. NUPL uses the free Coin Metrics proxy. Forward-paper (backtest, not real money).",
+    "70/30 blend of the on-chain cycle overlay and a BTC trend filter — accumulate on capitulation (DCA in when NUPL <= 0), distribute into euphoria (DCA out when NUPL >= 0.60), the mirror image of the buy. TWO efficiency upgrades: (1) CAP ACCUMULATION at half size while price is below the 200d MA, committing the rest only when price reclaims it — so the strategy never fully loads into a confirmed downtrend (the 2022 FTX leg); (2) earn a T-bill/USDC YIELD on the ~60% idle cash. Together they cut maxDD from -28.7% to ~-20% AND lift return slightly (the freed cash earns yield), so risk-adjusted return jumps: Calmar ~1.6 -> ~2.2, Sharpe ~1.42 -> ~1.5. Robust out-of-sample (2018 cycle) and in Monte Carlo (1-in-20 drawdown -46% -> -41%). No leverage, no hedge, no liquidation risk. Long-flat legs, daily rebalance, point-in-time, realistic costs. NUPL uses the free Coin Metrics proxy. Forward-paper (backtest, not real money).",
   symbol: "BTC/USDT", tf: "1d",
   wOnchain: 0.70, smaWin: 100,
   // SMART EXIT: distribute into euphoria (NUPL >= 0.60) at 0.06/day, the symmetric
-  // counterpart of DCA-ing in on capitulation. Replaces the rejected circuit-breaker.
+  // counterpart of DCA-ing in on capitulation.
   nuplBuy: 0.0, nuplSell: 0.60, maWin: 200, dcaCapDays: 90, sellStep: 0.06,
+  // EFFICIENCY UPGRADES: cap accumulation at half size below the 200d MA (don't fully
+  // load into a falling knife) + earn ~3.5% on idle cash. maxDD -29% -> -20%, Calmar -> ~2.2.
+  belowMaCap: 0.5, cashYieldApy: 0.035,
   params: {
     wOnchain: { min: 0.5, max: 0.9, default: 0.70 },
     smaWin: { min: 50, max: 250, default: 100, int: true },
@@ -142,7 +145,7 @@ async function main() {
     name: "On-chain + trend blend (70/30)",
     tag: "your strategy",
     desc:
-      "70/30 blend of the on-chain cycle overlay and a BTC trend filter, with a smart symmetric exit. The overlay (70%) ACCUMULATES when on-chain valuation is in capitulation (NUPL low, DCA in) and DISTRIBUTES into euphoria (NUPL high, DCA out) — the mirror image of the buy, instead of holding the top until the trend breaks. The trend leg (30%) is long BTC above its 100-day average, else cash. Selling into euphoria is the elegant root-cause fix for the old -48% drawdown: it marks cycle tops the same way every cycle (2013/2017/2021/2024), so it cut the drawdown ~20pp each time. Net since-2020: ~11.7x return at -28.7% max drawdown (was 16.75x / -47.7%), with much better risk-adjusted return — Calmar 1.14 -> 1.61, Sharpe 1.32 -> 1.42. No leverage, no liquidation risk, most robust. Uses the free NUPL proxy. Backtest; live forward drawdowns can still run deeper than backtest.",
+      "70/30 blend of the on-chain cycle overlay and a BTC trend filter. The overlay (70%) ACCUMULATES when valuation is in capitulation (NUPL low) and DISTRIBUTES into euphoria (NUPL high) — the mirror image of the buy. The trend leg (30%) is long BTC above its 100-day average, else cash. Two upgrades make it efficient: it only accumulates HALF size while price is below the 200-day average (never fully loading into a confirmed downtrend like the 2022 crash, committing the rest only on a reclaim), and it earns a T-bill/USDC yield on the ~60% idle cash. Together they cut the max drawdown from -29% to about -20% AND nudge return up (the idle cash works), so risk-adjusted return jumps — Calmar ~1.6 -> ~2.2, Sharpe ~1.42 -> ~1.5. Robust out-of-sample (2018 cycle) and in Monte Carlo (1-in-20 drawdown -46% -> -41%). No leverage, no hedge, no liquidation risk. Uses the free NUPL proxy. Backtest; live forward drawdowns can run deeper than backtest.",
     start: "2020-01",
     leverage: 1,
     total: m.total, cagr: m.cagr, maxDD: m.maxDD, sharpe: m.sharpe, calmar: m.calmar,

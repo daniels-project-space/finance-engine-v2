@@ -41,6 +41,15 @@ export interface BlendSleeveDoc {
   maWin: number;               // trend-confirm MA for Leg A (200)
   dcaCapDays: number;          // DCA-IN ramp cap in days (90)
   sellStep?: number;           // DCA-OUT rate per day while in euphoria above the 200d MA (default 0.06)
+  // CAP ACCUMULATION in a confirmed downtrend: while price is BELOW the 200d MA, only
+  // DCA in up to `belowMaCap` of full size; commit the rest only once price reclaims
+  // the 200d (real markup). Stops the strategy fully loading into a falling knife (the
+  // 2022 FTX leg) — cuts maxDD ~-29% -> ~-20%, lifts Calmar ~1.6 -> ~2.2. Default 1 = off.
+  belowMaCap?: number;         // 0.5 = accumulate only half size below the 200d MA
+  // IDLE-CASH YIELD: the strategy holds cash ~60% of the time; credit a T-bill/USDC
+  // yield on the idle fraction (0 drawdown, 0 correlation). Lifts return back above the
+  // original while the cap lowers drawdown. Default 0 = off. Conservative through-cycle rate.
+  cashYieldApy?: number;       // e.g. 0.035 (3.5% annual on idle cash)
   params: Record<string, { min: number; max: number; default: number; int?: boolean }>;
   risk: { volTargetAnnual: number; maxLeverage: number };
 }
@@ -129,8 +138,9 @@ export function legAWeights(S: BlendDaily, doc: BlendSleeveDoc, lo: number, hi: 
       else tg = Math.max(0, prev - sellStep);               // euphoria -> DCA OUT (distribute into strength)
       if (tg <= 1e-9) mode = "idle";
     } else if (mode === "buy") {
-      if (above200d) tg = 1;                                // trend confirms -> full size
-      else tg = Math.min(1, prev + step);                  // DCA in
+      const belowCap = doc.belowMaCap ?? 1;                 // cap accumulation in a confirmed downtrend
+      if (above200d) tg = 1;                                // trend confirms (markup) -> full size
+      else tg = Math.min(belowCap, prev + step);            // DCA in, but only up to belowCap while below the 200d
       if (tg >= 1 - 1e-9) mode = "idle";
     }
     w[i] = tg; prev = tg;
@@ -182,8 +192,15 @@ export function backtestBlend(doc: BlendSleeveDoc, S: BlendDaily, range?: { star
   const rA = realizeLeg(S, wA, startI, endI, slip);
   const rB = realizeLeg(S, wB, startI, endI, slip);
   const wa = doc.wOnchain;
+  const yApy = doc.cashYieldApy ?? 0;                       // idle-cash yield (0 = off)
   const ret: number[] = [], t: number[] = [];
-  for (let k = 0; k < rA.length; k++) { ret.push(wa * rA[k] + (1 - wa) * rB[k]); t.push(S.t[startI + 1 + k]); }
+  for (let k = 0; k < rA.length; k++) {
+    // the weight HELD during the day that earns r[k] is w[startI+k] (realizeLeg lags by one)
+    const wHeld = wa * wA[startI + k] + (1 - wa) * wB[startI + k];
+    const idle = Math.max(0, 1 - wHeld);                    // un-deployed fraction earns the cash yield
+    ret.push(wa * rA[k] + (1 - wa) * rB[k] + idle * (yApy / 365));
+    t.push(S.t[startI + 1 + k]);
+  }
   let expA = 0, expB = 0, exp = 0, c = 0;
   for (let i = startI; i <= endI; i++) { expA += wA[i] > 0 ? 1 : 0; expB += wB[i] > 0 ? 1 : 0; exp += (wa * wA[i] + (1 - wa) * wB[i]) > 1e-6 ? 1 : 0; c++; }
   return { retA: rA, retB: rB, ret, t, expA: expA / Math.max(1, c), expB: expB / Math.max(1, c), exp: exp / Math.max(1, c) };

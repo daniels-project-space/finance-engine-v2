@@ -173,6 +173,9 @@ async function blendForwardStep(
       if (ft <= Date.now()) portRet -= prevWeight * bars.fundingR[fi];
     }
   }
+  // idle-cash yield: the un-deployed fraction earns a T-bill/USDC rate (one day per
+  // applied daily step; applyStep's stepTs idempotency keeps this to ~once/day).
+  if (doc.cashYieldApy) portRet += Math.max(0, 1 - prevWeight) * (doc.cashYieldApy / 365);
   const wTo = t.weight;                                   // 0.7*legA + 0.3*legB, in [0,1]
   const trades: ForwardStep["trades"] = [];
   if (Math.abs(wTo - prevWeight) > 0.02) {
