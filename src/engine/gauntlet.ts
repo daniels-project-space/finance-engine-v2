@@ -26,6 +26,8 @@ import { type XSectionDoc, type XAligned, backtestXSection, walkForwardXSection 
 import { type IvSleeveDoc, type IvDaily, backtestIv, walkForwardIv } from "./ivsleeve";
 import { type OcSleeveDoc, type OcDaily, backtestOc, walkForwardOc } from "./onchainsleeve";
 import { type TrendBetaDoc, type TrendDaily, backtestTrend, walkForwardTrend } from "./trendbeta";
+import { type CombinationDoc, type BlockStream, blockWfStream, blockDoc, combinedStream, alignBlocks, resolveWeights } from "./combination";
+import { runBacktest as runBt } from "./backtest";
 
 /** Largest indicator lookback in bars, resolving param-valued periods. Used to
  *  size the purge window + embargo for the leakage-cleaned WF (shadow). */
@@ -1104,4 +1106,110 @@ export function runGauntletTrend(g: TrendInputs): GauntletReport {
   }
   const finalParams: Record<string, number> = { smaWin: doc.smaWin };
   return { passed: true, stages, metrics, bestParams: finalParams, curves, portfolioOos: portCarry };
+}
+
+// ====================================================================
+// COMBINATION gauntlet — judges a COMBINED candidate (portfolio or overlay) as ONE
+// unit. Builds each block's POINT-IN-TIME OOS stream (per-block WF re-tunes block
+// params per window), combines them per the doc (weighted book or base×gate
+// overlay), and runs the IDENTICAL validated math on the COMBINED stream:
+//   S3cb walk-forward screen -> S5cb DSR + bootstrap-CI -> S6cb sealed holdout.
+// Same dsr() / bootstrapSharpeCI() / floors.* as every other sleeve. No new
+// validation math; this is a generation-side combine + the same honest judge.
+// ====================================================================
+export interface CombinationInputs {
+  doc: CombinationDoc;
+  /** dev-window (pre-seal) 1d bars per block symbol */
+  barsBySym: Map<string, Bars>;
+  /** sealed-window 1d bars per block symbol (post-seal), if any */
+  sealedBySym?: Map<string, Bars>;
+  sealTs: number;
+  floors: GateFloors;
+  nTrialsTotal: number;
+  log?: (msg: string) => void;
+}
+
+export function runGauntletCombination(g: CombinationInputs): GauntletReport {
+  const stages: StageOutcome[] = [];
+  const metrics: GauntletReport["metrics"] = {};
+  const curves: GauntletReport["curves"] = {};
+  const { doc, barsBySym, floors } = g;
+  const ppy = 365;
+  let portCarry: { t: number[]; ret: number[] } | undefined;
+  const fail = (stage: string, reason: string, started: number, detail?: unknown): GauntletReport => {
+    stages.push({ stage, passed: false, reason, detail, durationMs: Date.now() - started });
+    return { passed: false, failedStage: stage, failedReason: reason, stages, metrics, curves, portfolioOos: portCarry };
+  };
+
+  // S0: every block must have enough pre-seal history.
+  let started = Date.now();
+  const blockStreams: BlockStream[] = [];
+  for (const b of doc.blocks) {
+    const bars = barsBySym.get(b.symbol);
+    if (!bars || bars.t.length < 600) return fail("S0-static", `block ${b.symbol} has insufficient bars`, started);
+    blockStreams.push(blockWfStream(bars, b));      // honest per-block WF (re-tunes block params per window)
+  }
+  stages.push({ stage: "S0-static", passed: true, durationMs: Date.now() - started });
+
+  // S3cb: build the COMBINED OOS stream from the block WF streams + screen it.
+  started = Date.now();
+  const combo = combinedStream(doc, blockStreams);  // pooled point-in-time daily returns
+  if (combo.ret.length < 200) return fail("S3cb-walkforward", `combined OOS stream too short (${combo.ret.length})`, started);
+  const cs = seriesStats(combo.ret, combo.t, ppy);
+  metrics.wfPooledSharpe = cs.sharpe; metrics.wfPctPositive = cs.pctPositive; metrics.wfMaxDD = cs.maxDD;
+  metrics.portOosSharpe = cs.sharpe; metrics.portPctPositive = cs.pctPositive; metrics.portMaxDD = cs.maxDD;
+  metrics.wfWorstMonth = cs.worstMonth; metrics.fullCagr = cs.cagr;
+  {
+    const eq = new Float64Array(combo.ret.length); let acc = 1;
+    for (let i = 0; i < combo.ret.length; i++) { acc *= 1 + combo.ret[i]; eq[i] = acc; }
+    curves.port = downsampleCurve(combo.t, eq, 0, eq.length - 1, 240);
+    portCarry = { t: combo.t.slice(), ret: combo.ret.slice() };
+  }
+  if (cs.sharpe < floors.wfMinMeanSharpe) return fail("S3cb-walkforward", `combined OOS sharpe ${cs.sharpe.toFixed(2)} < ${floors.wfMinMeanSharpe}`, started, { sharpe: cs.sharpe });
+  if (cs.maxDD < floors.wfMaxDD) return fail("S3cb-walkforward", `combined OOS maxDD ${(cs.maxDD * 100).toFixed(0)}%`, started, { maxDD: cs.maxDD });
+  if (cs.sharpe < floors.portMinSharpe) return fail("S4cb-portfolio", `combined OOS sharpe ${cs.sharpe.toFixed(2)} < ${floors.portMinSharpe}`, started, { sharpe: cs.sharpe });
+  stages.push({ stage: "S3cb-walkforward", passed: true, durationMs: Date.now() - started, detail: { bars: combo.ret.length, sharpe: cs.sharpe, blocks: doc.blocks.length, mode: doc.mode } });
+  g.log?.(`S3cb pass combined oosSharpe=${cs.sharpe.toFixed(2)} blocks=${doc.blocks.length} mode=${doc.mode}`);
+
+  // S5cb: DSR + bootstrap-CI on the COMBINED OOS stream — the SAME validated math.
+  started = Date.now();
+  const oos = Float64Array.from(combo.ret);
+  const d = dsr(oos, 2, oos.length - 1, Math.max(g.nTrialsTotal, 10), ppy);
+  metrics.dsr = d;
+  if (d < floors.minDSR) return fail("S5cb-stats", `DSR ${d.toFixed(3)} < ${floors.minDSR} (deflated for ${g.nTrialsTotal} trials)`, started, { dsr: d });
+  const boot = bootstrapSharpeCI(oos, 2, oos.length - 1, ppy);
+  metrics.bootstrapP5 = boot.p5;
+  if (boot.lo <= 0) return fail("S5cb-stats", `bootstrap 95% CI includes zero [${boot.lo.toFixed(2)}, ${boot.hi.toFixed(2)}]`, started, boot);
+  stages.push({ stage: "S5cb-stats", passed: true, durationMs: Date.now() - started, detail: { dsr: d, bootstrap: boot } });
+  g.log?.(`S5cb pass dsr=${d.toFixed(3)} ciLo=${boot.lo.toFixed(2)}`);
+
+  // S6cb: sealed holdout. Run each block (fixed seed params) on the post-seal bars,
+  // combine the same way, require positive sealed Sharpe + return. Honest holdout.
+  started = Date.now();
+  if (g.sealedBySym && doc.blocks.every((b) => (g.sealedBySym!.get(b.symbol)?.t.length ?? 0) > 60)) {
+    const sealedStreams: BlockStream[] = doc.blocks.map((b) => {
+      const sb = g.sealedBySym!.get(b.symbol)!;
+      const bt = runBt(blockDoc(b), sb, {}, { cost: { feeBps: 5, slipBps: 8 }, ppy: 365, startEquity: 1 });
+      const t: number[] = [], ret: number[] = [], w: number[] = [];
+      for (let i = 1; i < sb.t.length; i++) { t.push(sb.t[i]); ret.push(bt.ret[i]); w.push(Math.abs(bt.weights[i - 1]) > 1e-6 ? 1 : 0); }
+      return { t, ret, w };
+    });
+    const sealedCombo = combinedStream(doc, sealedStreams);
+    const ss = seriesStats(sealedCombo.ret, sealedCombo.t, ppy);
+    metrics.composite = 0.6 * cs.sharpe + 0.4 * ss.sharpe;
+    if (ss.sharpe < floors.sealedMinSharpe) return fail("S6cb-sealed", `sealed combined sharpe ${ss.sharpe.toFixed(2)} < ${floors.sealedMinSharpe}`, started, { sharpe: ss.sharpe });
+    if (ss.totalRet <= 0) return fail("S6cb-sealed", `sealed return ${(ss.totalRet * 100).toFixed(1)}% <= 0`, started, { ret: ss.totalRet });
+    stages.push({ stage: "S6cb-sealed", passed: true, durationMs: Date.now() - started, detail: { sharpe: ss.sharpe } });
+    g.log?.(`S6cb pass sealed sharpe=${ss.sharpe.toFixed(2)}`);
+  } else {
+    metrics.composite = cs.sharpe;
+    stages.push({ stage: "S6cb-sealed", passed: true, durationMs: Date.now() - started, detail: { note: "no sealed window" } });
+  }
+
+  // record the resolved allocation weights for diagnostics
+  const al = alignBlocks(blockStreams);
+  const finalWeights = doc.mode === "portfolio" ? resolveWeights(doc, al.R) : [1, 0];
+  const bestParams: Record<string, number> = { blocks: doc.blocks.length, leverage: doc.leverage };
+  doc.blocks.forEach((_, i) => { bestParams[`w${i}`] = Math.round((finalWeights[i] ?? 0) * 1000) / 1000; });
+  return { passed: true, stages, metrics, bestParams, curves, portfolioOos: portCarry };
 }

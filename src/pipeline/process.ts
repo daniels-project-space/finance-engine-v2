@@ -12,7 +12,9 @@ import { crossoverStrategies, mutateStrategy, randomStrategy, mechanismFirstStra
 import { icFamilyWeights, icRankingText, type IcRankedRow } from "../engine/signals";
 import { SEED_LIBRARY } from "../engine/library";
 import { IMPORTED_LIBRARY } from "../engine/imports";
-import { evaluateSealed, runGauntlet, runGauntletXSection, runGauntletIv, runGauntletOc, runGauntletTrend, type GauntletReport } from "../engine/gauntlet";
+import { evaluateSealed, runGauntlet, runGauntletXSection, runGauntletIv, runGauntletOc, runGauntletTrend, runGauntletCombination, type GauntletReport } from "../engine/gauntlet";
+import { isCombination, type CombinationDoc } from "../engine/combination";
+import { generateCombination, validateCombination, combinationHash, combinationFamilyHash } from "../engine/combinationGen";
 import { isXSection, alignUniverse, type XSectionDoc, type XAligned } from "../engine/xsection";
 import { generateXSection, validateXSection, xsectionHash, xsectionFamilyHash } from "../engine/xsectionGen";
 import { isIvSleeve, buildIvDaily, type IvSleeveDoc, type IvDaily } from "../engine/ivsleeve";
@@ -162,7 +164,7 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
   };
 
   const seedBase = (await cx.mutation(api.pipeline.bumpCounter, { key: "seed", by: 1 })) * 7919;
-  type Proposal = { doc: StrategyDoc | XSectionDoc | IvSleeveDoc | OcSleeveDoc | TrendBetaDoc; source: string; parentIds?: string[]; mechanism?: string; parentComposite?: number; expectedComposite?: number; wild?: boolean };
+  type Proposal = { doc: StrategyDoc | XSectionDoc | IvSleeveDoc | OcSleeveDoc | TrendBetaDoc | CombinationDoc; source: string; parentIds?: string[]; mechanism?: string; parentComposite?: number; expectedComposite?: number; wild?: boolean };
   const proposals: Proposal[] = [];
 
   // Library backfill: any research-backed seed or imported published strategy
@@ -293,6 +295,23 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
     }
   }
 
+  // COMBINATION lane: the strategy-COMBINATION / portfolio-composition generator —
+  // the #1 capability gap. Generates COMBINED candidates (multi-coin PORTFOLIOS like
+  // Daniel's CORE-4, and OVERLAYS like trend×regime) judged by the gauntlet as ONE
+  // unit (the COMBINED OOS stream through the SAME floors/DSR/bootstrap). Mechanism
+  // attribution: "portfolio" / "overlay" so the bandit learns which combos survive.
+  // Gated by cfg.combination.enabled (default off; flag-reversible).
+  if (cfg.combination?.enabled) {
+    const cbN = Math.max(1, Math.round((cfg.combination.perCycle ?? 4) * scale));
+    for (let i = 0; i < cbN; i++) {
+      const cbdoc = generateCombination(seedBase + 600_000 + i);
+      const mech = cbdoc.mode === "overlay" ? "overlay" : "portfolio";
+      proposals.push({ doc: cbdoc, source: "combination", mechanism: mech, expectedComposite: globalMean, wild: false });
+      summary.fresh++;
+    }
+    log(`combination lane ON (${cbN}/cycle: portfolios + overlays of the chop-trend block)`);
+  }
+
   // LLM lane. Anthropic goes through the subscription Claude CLI (NO API key),
   // which now runs in BOTH the VPS and the Trigger cloud image (the claude bin
   // is baked in and authed from the injected CLAUDE_CODE_OAUTH_TOKEN). On any CLI
@@ -346,6 +365,9 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
     } else if (isTrendBeta(p.doc)) {
       if (validateTrendBeta(p.doc).length > 0) continue;
       hash = trendBetaHash(p.doc); fam = trendBetaFamilyHash(p.doc); premium = "trendbeta";
+    } else if (isCombination(p.doc)) {
+      if (validateCombination(p.doc).length > 0) continue;
+      hash = combinationHash(p.doc); fam = combinationFamilyHash(p.doc); premium = "combination";
     } else {
       const sdoc = p.doc as StrategyDoc;
       if (validateStrategy(sdoc).length > 0) continue;
@@ -395,7 +417,7 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   const cand = await cx.query(api.candidates.get, { id: candidateId });
   if (!cand) throw new Error("candidate not found");
   const cfg = await getAppConfig(cx);
-  const rawDoc = JSON.parse(cand.dsl) as StrategyDoc | XSectionDoc | IvSleeveDoc | OcSleeveDoc | TrendBetaDoc;
+  const rawDoc = JSON.parse(cand.dsl) as StrategyDoc | XSectionDoc | IvSleeveDoc | OcSleeveDoc | TrendBetaDoc | CombinationDoc;
   const sealTs = Date.parse(cfg.sealDate);
 
   // CROSS-SECTIONAL routing: an xsection sleeve takes the adapted gauntlet path
@@ -414,6 +436,11 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   // TREND-BETA routing: a single-coin risk-managed-beta sleeve -> trend gauntlet.
   if (isTrendBeta(rawDoc)) {
     return processTrendCandidate(cx, candidateId, cand, rawDoc, cfg, sealTs, log);
+  }
+  // COMBINATION routing: a multi-block portfolio/overlay -> combination gauntlet,
+  // which judges the COMBINED OOS stream as one unit (same floors/DSR/bootstrap).
+  if (isCombination(rawDoc)) {
+    return processCombinationCandidate(cx, candidateId, cand, rawDoc, cfg, sealTs, log);
   }
   const doc = rawDoc as StrategyDoc;
 
@@ -1186,5 +1213,79 @@ async function processTrendCandidate(
   });
   await cx.mutation(api.pipeline.addLesson, { source: cand.source, candidateId, text: `TRENDBETA PASSED: "${cand.name}" risk-managed-beta sleeve (OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)}, dsr ${(report.metrics.dsr ?? 0).toFixed(2)}) -> 30-day paper incubation.` });
   log(`TRENDBETA PASSED -> incubating (OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)})`);
+  return { passed: true, composite: report.metrics.composite };
+}
+
+// ====================================================================
+// COMBINATION candidate processing (portfolio / overlay of chop-trend blocks). Loads
+// 1d bars for each block coin, splits dev/sealed at the seal date, runs the combined
+// gauntlet (the COMBINED OOS stream through the SAME floors + DSR/bootstrap math),
+// and routes through the book/forward-paper gate on a DSR fail — exactly like the
+// other sleeve families. The gauntlet/validation math is UNCHANGED.
+// ====================================================================
+async function processCombinationCandidate(
+  cx: ConvexHttpClient,
+  candidateId: Id<"candidates">,
+  cand: { name: string; hypothesis: string; source: string; hash: string; familyHash: string },
+  doc: CombinationDoc,
+  cfg: AppConfig,
+  sealTs: number,
+  log: Log,
+): Promise<ProcessResult> {
+  await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "gauntlet" });
+  const ppy = 365;
+  // load 1d bars per distinct block coin; split dev (pre-seal) / sealed (post-seal).
+  const symbols = [...new Set(doc.blocks.map((b) => b.symbol))];
+  const barsBySym = new Map<string, Bars>();
+  const sealedBySym = new Map<string, Bars>();
+  for (const sym of symbols) {
+    const bars = await loadBars(sym, "1d");
+    if (!bars || bars.t.length < 600) {
+      await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: "S0-static", failedReason: `missing/short bars for ${sym}` });
+      return { passed: false, stage: "S0-static" };
+    }
+    const sealIdx = bars.t.findIndex((t) => t >= sealTs);
+    const slice = (a: Bars, lo: number, hi: number): Bars => ({ symbol: a.symbol, tf: a.tf, t: a.t.slice(lo, hi), o: a.o.slice(lo, hi), h: a.h.slice(lo, hi), l: a.l.slice(lo, hi), c: a.c.slice(lo, hi), v: a.v.slice(lo, hi), fundingT: a.fundingT, fundingR: a.fundingR });
+    if (sealIdx >= 0) {
+      barsBySym.set(sym, slice(bars, 0, sealIdx));
+      if (bars.t.length - sealIdx > 60) sealedBySym.set(sym, slice(bars, sealIdx, bars.t.length));
+    } else {
+      barsBySym.set(sym, bars);
+    }
+  }
+
+  const nTrials = await cx.query(api.candidates.familySeenCount, { familyHash: cand.familyHash });
+  await cx.mutation(api.pipeline.bumpCounter, { key: "trials_total", by: 1 });
+
+  const report = runGauntletCombination({ doc, barsBySym, sealedBySym: sealedBySym.size ? sealedBySym : undefined, sealTs, floors: cfg.floors, nTrialsTotal: Math.max(nTrials, 40), log });
+  for (const s of report.stages) {
+    await cx.mutation(api.pipeline.addGateReport, { candidateId, stage: s.stage, passed: s.passed, reason: s.reason, report: JSON.stringify(s.detail ?? {}).slice(0, 20_000), durationMs: s.durationMs });
+  }
+  const curvesJson = JSON.stringify(report.curves ?? {});
+
+  if (!report.passed) {
+    const partial = report.metrics.wfPooledSharpe !== undefined ? 0.5 * report.metrics.wfPooledSharpe : undefined;
+    // BOOK/FORWARD-PAPER GATE: a combination that failed standalone S5cb-DSR but has a
+    // genuinely risk-improving combined stream is exactly what we want forward-tested.
+    if (cfg.book.marginalGate && report.failedStage === "S5cb-stats" && (report.failedReason ?? "").startsWith("DSR") && report.portfolioOos && report.portfolioOos.ret.length >= 100) {
+      try {
+        const admitted = await bookGatePromote(cx, cand, candidateId, report, cfg, ppy, log);
+        if (admitted) return { passed: true, composite: report.metrics.portOosSharpe };
+      } catch (e) { log(`combination book-gate skipped: ${e instanceof Error ? e.message.slice(0, 100) : e}`); }
+    }
+    await cx.mutation(api.candidates.updateStage, { id: candidateId, stage: "failed", failedStage: report.failedStage, failedReason: report.failedReason, metrics: JSON.stringify(report.metrics), curves: curvesJson, composite: partial });
+    await cx.mutation(api.pipeline.addLesson, { source: cand.source, candidateId, stage: report.failedStage, text: `COMBINATION FAILED ${report.failedStage}: "${cand.name}" (${doc.mode}, ${doc.blocks.length} blocks) — ${report.failedReason}` });
+    log(`COMBINATION FAILED at ${report.failedStage}: ${report.failedReason}`);
+    return { passed: false, stage: report.failedStage };
+  }
+
+  await cx.mutation(api.paper.ensureAccount, { candidateId, startEquity: cfg.paperStartEquity });
+  await cx.mutation(api.candidates.updateStage, {
+    id: candidateId, stage: "incubating",
+    metrics: JSON.stringify(report.metrics), bestParams: JSON.stringify(report.bestParams ?? {}),
+    curves: curvesJson, composite: report.metrics.composite ?? report.metrics.portOosSharpe, incubationStartedAt: Date.now(),
+  });
+  await cx.mutation(api.pipeline.addLesson, { source: cand.source, candidateId, text: `COMBINATION PASSED: "${cand.name}" (${doc.mode}, ${doc.blocks.length} blocks, ${doc.alloc}) combined OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)}, dsr ${(report.metrics.dsr ?? 0).toFixed(2)} -> 30-day paper incubation.` });
+  log(`COMBINATION PASSED -> incubating (combined OOS Sharpe ${(report.metrics.portOosSharpe ?? 0).toFixed(2)})`);
   return { passed: true, composite: report.metrics.composite };
 }

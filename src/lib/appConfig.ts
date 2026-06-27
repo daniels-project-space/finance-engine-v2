@@ -21,6 +21,11 @@ export interface AppConfig {
    *  the "safer than HODL" family (captures up-trend, sits out deep bears). Routes
    *  to the adapted trend gauntlet + book/forward-paper gate. ONE param (smaWin). */
   trendbeta?: { enabled: boolean; perCycle?: number };
+  /** COMBINATION lane: the strategy-COMBINATION / portfolio-composition generator.
+   *  Generates COMBINED candidates (multi-coin portfolios like CORE-4, and trend×
+   *  regime overlays) judged by the gauntlet as ONE unit — the COMBINED OOS stream
+   *  through the SAME floors/DSR/bootstrap. The #1 capability gap. */
+  combination?: { enabled: boolean; perCycle?: number };
   /** ON-CHAIN feature inputs (Coin Metrics community + DefiLlama, daily BTC/ETH).
    *  When enabled, on-chain features are attached to the primary bars so strategies
    *  can use mvrv/activeaddr/txcnt/nvt/exnetflow/stablesupply DSL ops. */
@@ -160,6 +165,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   // ON-CHAIN timing lane DEFAULT OFF in code; shipped ON via the live override.
   ocsleeve: { enabled: false, perCycle: 2 },
   trendbeta: { enabled: false, perCycle: 3 },
+  // COMBINATION lane DEFAULT OFF in code; shipped ON via the live override (reversible).
+  combination: { enabled: false, perCycle: 4 },
   // ON-CHAIN features DEFAULT OFF in code; shipped ON via the live override.
   onchain: { enabled: false },
   primarySymbol: "BTC/USDT",
