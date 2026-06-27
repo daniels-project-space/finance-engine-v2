@@ -13,7 +13,7 @@ import { isIvSleeve, buildIvDaily, type IvSleeveDoc } from "../engine/ivsleeve";
 import { isOcSleeve } from "../engine/onchainsleeve";
 import { isXSection } from "../engine/xsection";
 import { isTrendBeta, buildTrendDaily, type TrendBetaDoc } from "../engine/trendbeta";
-import { isBlendSleeve, blendTargetNow, ddGuardStep, type BlendSleeveDoc } from "../engine/blendsleeve";
+import { isBlendSleeve, blendTargetNow, type BlendSleeveDoc } from "../engine/blendsleeve";
 import { loadDvol, dvolMap, dvolCurrencyFor } from "../lib/deribit";
 import { sendTelegram } from "../lib/telegram";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -25,8 +25,6 @@ interface ForwardStep {
   portRet: number;
   newPositions: { symbol: string; weight: number; entryPrice?: number }[];
   trades: { symbol: string; ts: number; weightFrom: number; weightTo: number; price: number; fillPrice: number; costUsd: number; note?: string }[];
-  /** updated drawdown-guard exposure scale (blend sleeve only); persisted to the account. */
-  guardScale?: number;
 }
 
 // IV-vol sleeve forward step: long-flat ONE coin (BTC/ETH) from the point-in-time
@@ -153,7 +151,7 @@ async function trendForwardStep(
 // the blend weight is in [0,1] (no leverage). Mark-to-market + fee/slip on the weight
 // change + funding while exposed feed the SAME paper P&L accounting as every sleeve.
 async function blendForwardStep(
-  doc: BlendSleeveDoc, equity: number, peakEquity: number, prevGuardScale: number,
+  doc: BlendSleeveDoc, equity: number,
   prevWeight: number, prevPrice: number, lastStepTs: number | undefined,
 ): Promise<ForwardStep | null> {
   const bars0 = await loadBars(doc.symbol, "1d");
@@ -164,10 +162,6 @@ async function blendForwardStep(
   const SLIP_D: Record<string, number> = { "BTC/USDT": 1.5, "ETH/USDT": 2, "SOL/USDT": 3 };
   const slip = (SLIP_D[doc.symbol] ?? 3) / 1e4;
   const closeI = t.lastClose;
-  // DRAWDOWN CIRCUIT-BREAKER (live): same hysteresis as the backtest's applyDdGuard,
-  // driven by the sleeve's persisted equity/peak. Scales the target exposure; when
-  // no ddGuard is configured the scale stays 1 (unchanged behavior).
-  const guardScale = doc.ddGuard ? ddGuardStep(equity, peakEquity, prevGuardScale, doc.ddGuard) : 1;
   // mark-to-market: prev weight earned the move into the latest closed day
   let portRet = 0;
   if (prevWeight !== 0 && prevPrice > 0) portRet += prevWeight * (closeI / prevPrice - 1);
@@ -179,16 +173,16 @@ async function blendForwardStep(
       if (ft <= Date.now()) portRet -= prevWeight * bars.fundingR[fi];
     }
   }
-  const wTo = t.weight * guardScale;                     // (0.7*legA + 0.3*legB) scaled by the DD guard
+  const wTo = t.weight;                                   // 0.7*legA + 0.3*legB, in [0,1]
   const trades: ForwardStep["trades"] = [];
   if (Math.abs(wTo - prevWeight) > 0.02) {
     const side = Math.sign(wTo - prevWeight);
     const tradeCost = Math.abs(wTo - prevWeight) * (DEFAULT_FEE_BPS / 1e4 + slip);
     portRet -= tradeCost;
-    trades.push({ symbol: doc.symbol, ts: t.lastTs, weightFrom: prevWeight, weightTo: wTo, price: closeI, fillPrice: closeI * (1 + side * slip), costUsd: tradeCost * equity, note: `blend:A${(doc.wOnchain * 100).toFixed(0)}/B${((1 - doc.wOnchain) * 100).toFixed(0)} legA${t.legAW.toFixed(2)} legB${t.legBW.toFixed(2)}${guardScale < 1 ? ` guard${guardScale.toFixed(2)}` : ""}` });
+    trades.push({ symbol: doc.symbol, ts: t.lastTs, weightFrom: prevWeight, weightTo: wTo, price: closeI, fillPrice: closeI * (1 + side * slip), costUsd: tradeCost * equity, note: `blend:A${(doc.wOnchain * 100).toFixed(0)}/B${((1 - doc.wOnchain) * 100).toFixed(0)} legA${t.legAW.toFixed(2)} legB${t.legBW.toFixed(2)}` });
   }
   const newPositions = [{ symbol: doc.symbol, weight: Math.abs(wTo - prevWeight) > 0.02 ? wTo : prevWeight, entryPrice: closeI }];
-  return { stepTs: t.lastTs, portRet, newPositions, trades, guardScale };
+  return { stepTs: t.lastTs, portRet, newPositions, trades };
 }
 
 // ============================================================ CORE-4 PORTFOLIO
@@ -393,7 +387,6 @@ export const paperStep = schedules.task({
         let costUsd = 0;
         let newPositions: { symbol: string; weight: number; entryPrice?: number }[] = [];
         let trades: { symbol: string; ts: number; weightFrom: number; weightTo: number; price: number; fillPrice: number; costUsd: number; note?: string }[] = [];
-        let guardScale: number | undefined;   // blend DD-circuit-breaker state to persist
 
         // ---- KIND-AWARE DISPATCH ----------------------------------------------
         // ivsleeve trades ONE coin from the point-in-time DVOL signal; onchain /
@@ -423,9 +416,9 @@ export const paperStep = schedules.task({
           // 70/30 on-chain-overlay / BTC-trend blend: ONE coin at the combined
           // point-in-time blend weight (each leg computed independently, combined).
           const cur = posBySym.get(rawDoc.symbol);
-          const step = await blendForwardStep(rawDoc, acct.equity, acct.peakEquity, acct.guardScale ?? 1, cur?.weight ?? 0, cur?.entryPrice ?? 0, acct.lastStepTs);
+          const step = await blendForwardStep(rawDoc, acct.equity, cur?.weight ?? 0, cur?.entryPrice ?? 0, acct.lastStepTs);
           if (!step) { logger.log(`blend sleeve "${cand.name}": bars/on-chain unavailable, skipped`); continue; }
-          stepTs = step.stepTs; portRet = step.portRet; newPositions = step.newPositions; trades = step.trades; guardScale = step.guardScale;
+          stepTs = step.stepTs; portRet = step.portRet; newPositions = step.newPositions; trades = step.trades;
           for (const t of trades) costUsd += t.costUsd;
         } else if (isOcSleeve(rawDoc) || isXSection(rawDoc)) {
           // FRAMEWORK READY: route to backtestOc/backtestXSection's forward signal
@@ -493,7 +486,7 @@ export const paperStep = schedules.task({
 
         await cx.mutation(api.paper.applyStep, {
           candidateId, ts: stepTs, equity: newEquity, ret: portRet,
-          halted: halted || undefined, haltReason, guardScale,
+          halted: halted || undefined, haltReason,
           positions: halted ? newPositions.map((p) => ({ ...p, weight: 0 })) : newPositions,
           trades,
         });

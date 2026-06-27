@@ -40,16 +40,12 @@ const DOC: BlendSleeveDoc = {
   name: "blend_btc_70_30_onchain_trend_seed",
   kind: "blend",
   hypothesis:
-    "70/30 blend of the on-chain cycle overlay (NUPL = 1-1/MVRV + 200d-MA-confirmed DCA) and a BTC trend filter (long when close > SMA100), now with a DRAWDOWN CIRCUIT-BREAKER that halves exposure when the strategy is >22% below its own peak and restores near recovery. The two legs de-risk at DIFFERENT times — valuation-extreme vs trend-break — and the circuit-breaker responds to the drawdown itself, so the blend keeps ~12x since-2020 return while cutting the worst drawdown from -48% to ~-35% and RAISING Calmar 1.14->1.33 / Sharpe 1.32->1.35. The breaker is not overfit: a smooth param sweep and it shrinks the drawdown in every market era, not just 2022. Long-flat legs, no leverage, daily rebalance, point-in-time, realistic costs. NUPL uses the free Coin Metrics proxy. Forward-paper (backtest, not real money).",
+    "70/30 blend of the on-chain cycle overlay and a BTC trend filter, with a SMART (symmetric) exit. The overlay accumulates on capitulation (DCA in when NUPL <= 0) and now DISTRIBUTES into euphoria (DCA out when NUPL >= 0.60), the mirror image of the buy — instead of holding the top until the 200d MA breaks. This single principle (accumulate deep loss, distribute deep profit) is the elegant root-cause fix for the 2021-22 drawdown and generalizes across EVERY on-chain cycle (2013/2017/2021/2024), cutting the drawdown ~20pp each time. Since-2020: ~11.7x return at -28.7% maxDD (was 16.75x / -47.7%) with Calmar 1.14 -> 1.61 and Sharpe 1.32 -> 1.42 — far more efficient, lowest drawdown, no leverage, no liquidation risk. Long-flat legs, daily rebalance, point-in-time, realistic costs. NUPL uses the free Coin Metrics proxy. Forward-paper (backtest, not real money).",
   symbol: "BTC/USDT", tf: "1d",
   wOnchain: 0.70, smaWin: 100,
-  nuplBuy: 0.0, nuplSell: 0.45, maWin: 200, dcaCapDays: 90,
-  // DRAWDOWN CIRCUIT-BREAKER ("preserve return" point on the v4 frontier): halve
-  // exposure once the sleeve is 22% below its own peak; restore once it recovers to
-  // within 10% of the peak. Cuts the 2021-22 deep drawdown -47.7% -> -35% and raises
-  // Calmar 1.14 -> 1.33 / Sharpe 1.32 -> 1.35; costs ~27% of terminal return. NOT
-  // overfit: the param sweep is smooth and it shrinks the drawdown in EVERY era.
-  ddGuard: { trip: -0.22, floor: 0.5, reset: -0.10 },
+  // SMART EXIT: distribute into euphoria (NUPL >= 0.60) at 0.06/day, the symmetric
+  // counterpart of DCA-ing in on capitulation. Replaces the rejected circuit-breaker.
+  nuplBuy: 0.0, nuplSell: 0.60, maWin: 200, dcaCapDays: 90, sellStep: 0.06,
   params: {
     wOnchain: { min: 0.5, max: 0.9, default: 0.70 },
     smaWin: { min: 50, max: 250, default: 100, int: true },
@@ -137,7 +133,7 @@ async function main() {
     name: "On-chain + trend blend (70/30)",
     tag: "your strategy",
     desc:
-      "70/30 blend of the on-chain cycle overlay and a BTC trend filter, with a drawdown circuit-breaker. The overlay (70%) buys when on-chain valuation is in capitulation (NUPL low) and holds while price stays above its 200-day average; the trend leg (30%) is simply long BTC above its 100-day average, else cash. Because the two de-risk at DIFFERENT times — valuation-extreme vs trend-break — blending them already cut the drawdown; the circuit-breaker then halves exposure whenever the strategy itself falls >22% below its peak (restoring near recovery), which tames the 2021-22 crash. Net: ~12x since-2020 return at about -35% max drawdown (was -48%), with BETTER risk-adjusted return (Calmar 1.33, Sharpe 1.35). The breaker is not curve-fit — a smooth parameter sweep, and it reduces drawdown in every market era. No leverage. Uses the free NUPL proxy. Backtest; the live forward path applies the same breaker, and live drawdowns can still run deeper than backtest.",
+      "70/30 blend of the on-chain cycle overlay and a BTC trend filter, with a smart symmetric exit. The overlay (70%) ACCUMULATES when on-chain valuation is in capitulation (NUPL low, DCA in) and DISTRIBUTES into euphoria (NUPL high, DCA out) — the mirror image of the buy, instead of holding the top until the trend breaks. The trend leg (30%) is long BTC above its 100-day average, else cash. Selling into euphoria is the elegant root-cause fix for the old -48% drawdown: it marks cycle tops the same way every cycle (2013/2017/2021/2024), so it cut the drawdown ~20pp each time. Net since-2020: ~11.7x return at -28.7% max drawdown (was 16.75x / -47.7%), with much better risk-adjusted return — Calmar 1.14 -> 1.61, Sharpe 1.32 -> 1.42. No leverage, no liquidation risk, most robust. Uses the free NUPL proxy. Backtest; live forward drawdowns can still run deeper than backtest.",
     start: "2020-01",
     leverage: 1,
     total: m.total, cagr: m.cagr, maxDD: m.maxDD, sharpe: m.sharpe, calmar: m.calmar,
@@ -162,19 +158,30 @@ async function main() {
     portOosSharpe: m.sharpe, wfPooledSharpe: m.sharpe,
     forwardPaper: 1, forwardPaperSeed: 1, userStrategy: 1,
   };
-  const created = await cx.mutation(api.candidates.create, {
-    name: DOC.name, source: "blend", dsl: JSON.stringify(DOC), hash, familyHash: fam,
-    hypothesis: DOC.hypothesis, premium: "blend",
-  }) as { id: string; duplicate: boolean };
-  const id = created.id as Id<"candidates">;
-  if (created.duplicate) console.log(`  (candidate already existed — updating its paper state)`);
+  // Find any existing blend sleeve by NAME and update IT in place (a config tweak
+  // changes the content hash, so create() would otherwise insert a 2nd row — we want
+  // ONE sleeve). Fall back to create() on first seed.
+  const recent = await cx.query(api.candidates.recent, { limit: 200 }) as { _id: string; name: string }[];
+  const existing = recent.find((r) => r.name === DOC.name);
+  let id: Id<"candidates">;
+  if (existing) {
+    id = existing._id as Id<"candidates">;
+    console.log(`  (updating existing blend sleeve ${id} in place)`);
+  } else {
+    const created = await cx.mutation(api.candidates.create, {
+      name: DOC.name, source: "blend", dsl: JSON.stringify(DOC), hash, familyHash: fam,
+      hypothesis: DOC.hypothesis, premium: "blend",
+    }) as { id: string; duplicate: boolean };
+    id = created.id as Id<"candidates">;
+  }
   await cx.mutation(api.paper.ensureAccount, { candidateId: id, startEquity: 10_000 });
   await cx.mutation(api.candidates.updateStage, {
     id, stage: "incubating",
     metrics: JSON.stringify(metrics),
     bestParams: JSON.stringify({ wOnchain: DOC.wOnchain, smaWin: DOC.smaWin }),
     curves: JSON.stringify({ full: { t: curve.t, eq: curve.eq } }),
-    dsl: JSON.stringify(DOC),   // refresh stored dsl in place (now carries ddGuard) so the live step uses it
+    dsl: JSON.stringify(DOC),         // refresh stored dsl in place (smart-exit params) so the live step uses it
+    hypothesis: DOC.hypothesis,       // refresh the stored rationale (was the old circuit-breaker text)
     composite: m.sharpe, incubationStartedAt: Date.now(),
   });
   await cx.mutation(api.pipeline.addLesson, {

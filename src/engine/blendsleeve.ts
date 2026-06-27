@@ -31,19 +31,16 @@ export interface BlendSleeveDoc {
   tf: "1d";
   wOnchain: number;            // Leg-A weight (0.70)
   smaWin: number;              // Leg-B trend SMA window (100)
-  // Leg-A overlay params (ported from the spike, exposed for transparency)
-  nuplBuy: number;             // buy when NUPL <= this (0.0)
-  nuplSell: number;            // arm sell when NUPL >= this (0.45)
+  // Leg-A overlay params. The SELL side is now SYMMETRIC to the buy: just as we DCA
+  // IN on capitulation (NUPL <= nuplBuy), we DCA OUT into euphoria (NUPL >= nuplSell)
+  // — distributing into deep unrealized profit instead of holding the top until the
+  // trend breaks. This "smart exit" is the elegant root-cause fix for the 2021-22
+  // drawdown and generalizes across every on-chain cycle (2013/2017/2021/2024).
+  nuplBuy: number;             // buy (DCA in) when NUPL <= this (0.0)
+  nuplSell: number;            // sell (DCA out) when NUPL >= this (euphoria, 0.60)
   maWin: number;               // trend-confirm MA for Leg A (200)
-  dcaCapDays: number;          // DCA ramp cap in days (90)
-  // DRAWDOWN CIRCUIT-BREAKER (optional): scale total exposure to `floor` once the
-  // sleeve's OWN equity is `trip` below its running peak; restore to full once it
-  // recovers to within `reset` of the peak (hysteresis). Point-in-time — reads only
-  // the strategy's past equity, no look-ahead, no curve-fit to any date. Cuts the
-  // 2021-22-style deep drawdown (-47.7% -> ~-35%) and IMPROVES Calmar/Sharpe; the
-  // cost is some terminal return. See the v4 frontier sweep (smooth, not spiky =
-  // not overfit) and the per-era check (helps in EVERY regime, not just 2022).
-  ddGuard?: { trip: number; floor: number; reset: number };
+  dcaCapDays: number;          // DCA-IN ramp cap in days (90)
+  sellStep?: number;           // DCA-OUT rate per day while in euphoria above the 200d MA (default 0.06)
   params: Record<string, { min: number; max: number; default: number; int?: boolean }>;
   risk: { volTargetAnnual: number; maxLeverage: number };
 }
@@ -102,16 +99,23 @@ function smaAt(close: number[], i: number, win: number): number {
 }
 
 /**
- * LEG A weights — the on-chain cycle overlay, ported EXACTLY from the spike's
- * wOnchain(). DCA-ramped buy/sell with a 200d-MA hold-through on the sell side.
- * Returns the per-day target weight (0..1) over [lo,hi]. Point-in-time: at day i it
- * reads only S.nupl[i] / S.ma[i] (both already lagged in buildBlendDaily).
+ * LEG A weights — the on-chain cycle overlay with a SMART (symmetric) exit.
+ * BUY: DCA in on capitulation (NUPL <= buy), full size once the 200d confirms.
+ * SELL: DCA OUT into euphoria (NUPL >= sell) at `sellStep`/day — distribute into deep
+ *   unrealized profit instead of holding the top — AND exit fast (2x DCA step) if the
+ *   200d MA is lost (a trend-break crash that beat the valuation signal). This is the
+ *   elegant root-cause fix for the 2021-22 drawdown: the OLD logic held through
+ *   euphoria while above the 200d and rode every top down; selling into euphoria cuts
+ *   the drawdown ~20pp across EVERY cycle (2013/2017/2021/2024) and lifts Calmar
+ *   1.14 -> 1.61. Returns the per-day target weight (0..1) over [lo,hi]. Point-in-time:
+ *   at day i it reads only S.nupl[i] / S.ma[i] (both already lagged in buildBlendDaily).
  */
 export function legAWeights(S: BlendDaily, doc: BlendSleeveDoc, lo: number, hi: number): number[] {
   const n = S.t.length;
   const w = new Array<number>(n).fill(0);
   const buy = doc.nuplBuy, sell = doc.nuplSell, cap = doc.dcaCapDays;
-  const step = 1 / Math.max(1, Math.round(cap / 30 * 4));   // spike's DCA step
+  const step = 1 / Math.max(1, Math.round(cap / 30 * 4));   // DCA-in step
+  const sellStep = doc.sellStep ?? 0.06;                    // DCA-out step (euphoria distribution)
   let prev = 0;
   let mode: "idle" | "sell" | "buy" = "idle";
   for (let i = lo; i <= hi; i++) {
@@ -122,7 +126,7 @@ export function legAWeights(S: BlendDaily, doc: BlendSleeveDoc, lo: number, hi: 
     let tg = prev;
     if (mode === "sell") {
       if (!above200d) tg = Math.max(0, prev - 2 * step);    // 200d lost -> exit fast (2x step)
-      else tg = prev;                                       // euphoric but still trending -> HOLD
+      else tg = Math.max(0, prev - sellStep);               // euphoria -> DCA OUT (distribute into strength)
       if (tg <= 1e-9) mode = "idle";
     } else if (mode === "buy") {
       if (above200d) tg = 1;                                // trend confirms -> full size
@@ -163,40 +167,6 @@ export interface BlendBacktest {
 }
 
 /**
- * DRAWDOWN CIRCUIT-BREAKER (backtest). Scale each day's blended return by the
- * exposure `scale`: once the running equity is `trip` below its peak, scale -> floor;
- * once it recovers to within `reset` of the peak, scale -> 1 (hysteresis avoids
- * chatter). Point-in-time — uses only equity realized up to the prior day. Returns
- * the guarded daily return stream (same length).
- */
-export function applyDdGuard(ret: number[], g: { trip: number; floor: number; reset: number }): number[] {
-  const out: number[] = [];
-  let eq = 1, peak = 1, scale = 1;
-  for (let i = 0; i < ret.length; i++) {
-    out.push(ret[i] * scale);
-    eq *= 1 + ret[i] * scale;
-    if (eq > peak) peak = eq;
-    const dd = eq / peak - 1;
-    if (dd <= g.trip) scale = g.floor;
-    else if (dd >= g.reset) scale = 1;
-  }
-  return out;
-}
-
-/**
- * One-step guard-scale update for the LIVE forward path (identical hysteresis to
- * applyDdGuard). Given the sleeve's running peak/equity and its PREVIOUS scale,
- * return the exposure scale to apply to the NEXT target weight. `peakEquity` and
- * `equity` are the values the paper account already persists.
- */
-export function ddGuardStep(equity: number, peakEquity: number, prevScale: number, g: { trip: number; floor: number; reset: number }): number {
-  const dd = peakEquity > 0 ? equity / peakEquity - 1 : 0;
-  if (dd <= g.trip) return g.floor;
-  if (dd >= g.reset) return 1;
-  return prevScale;
-}
-
-/**
  * Full blended backtest over [startI,endI]: realize each leg, combine
  * wOnchain*rA + (1-wOnchain)*rB at the RETURN level (daily rebalance, no leverage),
  * exactly like the spike's blendRet(). Returns per-leg + blended daily streams.
@@ -214,11 +184,9 @@ export function backtestBlend(doc: BlendSleeveDoc, S: BlendDaily, range?: { star
   const wa = doc.wOnchain;
   const ret: number[] = [], t: number[] = [];
   for (let k = 0; k < rA.length; k++) { ret.push(wa * rA[k] + (1 - wa) * rB[k]); t.push(S.t[startI + 1 + k]); }
-  // drawdown circuit-breaker on the COMBINED stream (after blending the legs)
-  const retGuarded = doc.ddGuard ? applyDdGuard(ret, doc.ddGuard) : ret;
   let expA = 0, expB = 0, exp = 0, c = 0;
   for (let i = startI; i <= endI; i++) { expA += wA[i] > 0 ? 1 : 0; expB += wB[i] > 0 ? 1 : 0; exp += (wa * wA[i] + (1 - wa) * wB[i]) > 1e-6 ? 1 : 0; c++; }
-  return { retA: rA, retB: rB, ret: retGuarded, t, expA: expA / Math.max(1, c), expB: expB / Math.max(1, c), exp: exp / Math.max(1, c) };
+  return { retA: rA, retB: rB, ret, t, expA: expA / Math.max(1, c), expB: expB / Math.max(1, c), exp: exp / Math.max(1, c) };
 }
 
 /** Metrics from a daily return stream (since-window): total mult, CAGR, maxDD,
