@@ -12,7 +12,7 @@ import { ChartWithBenchmarks, Lead, Info, fmt, pct, type Curve } from "../compon
 // config. HONEST: these are backtests; the live forward-test is on the Live tab.
 
 interface Strat {
-  key: string; name: string; tag: string; desc: string; start: string; leverage: number;
+  key: string; name: string; tag: string; desc: string; start: string; leverage: number; hodlLabel?: string;
   total: number; cagr: number; maxDD: number; sharpe: number; calmar: number; winRate: number; timeInMkt: number;
   curve: { t: number[]; eq: number[] }; btcHodl: { t: number[]; c: number[] };
 }
@@ -79,7 +79,7 @@ export default function MyStrategiesPage() {
               height={300} yLabel="growth of $1" showMetrics
               storeKey={`mystrat-${s.key}`}
               benchmarks={{ spx: bench?.spx ?? null, btc: null }}
-              extra={s.btcHodl?.t?.length ? [{ label: "BTC HODL", color: "#f5b932", raw: s.btcHodl, primary: true }] : []}
+              extra={s.btcHodl?.t?.length ? [{ label: s.hodlLabel ?? "BTC HODL", color: "#f5b932", raw: s.btcHodl, primary: true }] : []}
               stratLabel={s.name}
               series={[{ name: s.name, color: i === 0 ? "#5cc8ff" : "#3ddb9e", curve }]}
             />
