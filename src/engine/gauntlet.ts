@@ -145,6 +145,61 @@ export interface GauntletReport {
   portfolioOos?: { t: number[]; ret: number[] };
 }
 
+// ====================================================================
+// RISK-MANAGED GENERATION OBJECTIVE (capability #4) — RANKING TILT ONLY.
+// ====================================================================
+// The composite is the RANKING score that orders survivors on the leaderboard,
+// sets the bandit/ledger expectation, and STEERS which strategies get bred. It
+// is NOT a gauntlet pass/fail gate (drawdown floors are enforced separately by
+// `return fail(...)` inside each stage). To make generation actively HUNT for
+// low-drawdown shapes — not merely tolerate them at a floor — we apply a bounded,
+// monotonic multiplicative tilt to metrics.composite AFTER every pass/fail
+// decision has already been made. A lower |maxDD| (higher Calmar) yields a
+// bounded bonus; a higher |maxDD| a bounded penalty. Clamped so a clearly-better
+// Sharpe still generally outranks a worse one — this is a TILT, not a takeover.
+//
+// Flag-gated + reversible: with riskObjective.enabled !== true the tilt is a
+// no-op and composite is byte-identical to before. Set via setRiskObjective()
+// (mirrors the setIcBias precedent in evolve.ts) from the pipeline once per run.
+type RiskObjectiveCfg = { enabled: boolean; targetDD?: number; weight?: number; floor?: number; ceil?: number };
+let RISK_OBJECTIVE: RiskObjectiveCfg | null = null;
+/** Set (or clear) the risk-managed ranking objective. Pass null/{enabled:false}
+ *  to restore the pure-Sharpe composite exactly. */
+export function setRiskObjective(cfg: RiskObjectiveCfg | null | undefined): void {
+  RISK_OBJECTIVE = cfg && cfg.enabled ? cfg : null;
+}
+
+/** Bounded, monotonic drawdown tilt applied to metrics.composite in place, right
+ *  before each runGauntlet* returns a PASSING report. No-op unless the objective
+ *  is enabled, the composite is a finite POSITIVE number (multiplying a <=0 score
+ *  would invert ordering), and a drawdown field is present. Uses the deployed
+ *  portfolio OOS maxDD when available (portMaxDD), else wfMaxDD, else fullMaxDD —
+ *  all already in `metrics`; nothing is recomputed, so no look-ahead is possible.
+ *
+ *  factor = clamp(1 + weight * (targetDD - |maxDD|) / targetDD, floor, ceil)
+ *  - |maxDD| == targetDD -> factor 1 (neutral)
+ *  - lower |maxDD|       -> factor > 1 (bonus)  [never DECREASES the score]
+ *  - higher |maxDD|      -> factor < 1 (penalty)
+ *  clamped to [floor, ceil] (default [0.7, 1.15]) so the tilt is bounded and the
+ *  ordering can never be pathologically inverted by the drawdown term alone. */
+function applyRiskTilt(metrics: GauntletReport["metrics"]): void {
+  const cfg = RISK_OBJECTIVE;
+  if (!cfg || !cfg.enabled) return;
+  const composite = metrics.composite;
+  if (composite === undefined || !Number.isFinite(composite) || composite <= 0) return;
+  const ddRaw = metrics.portMaxDD ?? metrics.wfMaxDD ?? metrics.fullMaxDD;
+  if (ddRaw === undefined || !Number.isFinite(ddRaw)) return;
+  const absDD = Math.abs(ddRaw);
+  const targetDD = cfg.targetDD && cfg.targetDD > 1e-6 ? cfg.targetDD : 0.30;
+  const weight = cfg.weight ?? 0.5;
+  const floor = cfg.floor ?? 0.7;
+  const ceil = cfg.ceil ?? 1.15;
+  const shortfall = (targetDD - absDD) / targetDD; // >0 when DD is BETTER (smaller) than target
+  const raw = 1 + weight * shortfall;
+  const factor = Math.min(ceil, Math.max(floor, raw));
+  metrics.composite = composite * factor;
+}
+
 /** Equal-weight merge of per-bar OOS return streams aligned by timestamp. */
 export function mergePortfolio(streams: { t: Float64Array; ret: Float64Array }[]): { t: number[]; ret: number[] } {
   const acc = new Map<number, { s: number; n: number }>();
@@ -588,6 +643,7 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
 
   // composite is keyed to the DEPLOYED portfolio; sealed (also portfolio) adds 0.3 later
   metrics.composite = 0.5 * (metrics.portOosSharpe ?? 0) + 0.2 * (metrics.fullSharpe ?? 0);
+  applyRiskTilt(metrics); // risk-managed ranking tilt — AFTER all pass/fail; no-op unless enabled
   return { passed: true, stages, metrics, bestParams: finalParams, curves, portfolioOos };
 }
 
@@ -779,6 +835,7 @@ export function runGauntletXSection(g: XSectionInputs): GauntletReport {
     stages.push({ stage: "S6x-sealed", passed: true, durationMs: Date.now() - started, detail: { note: "no sealed window" } });
   }
   void scaleT;
+  applyRiskTilt(metrics); // risk-managed ranking tilt — AFTER all pass/fail; no-op unless enabled
   return { passed: true, stages, metrics, bestParams: medianXParams(wf.bestParamsByWindow, doc), curves, portfolioOos: portCarry };
 }
 
@@ -881,6 +938,7 @@ export function runGauntletIv(g: IvInputs): GauntletReport {
     stages.push({ stage: "S6iv-sealed", passed: true, durationMs: Date.now() - started, detail: { note: "no sealed window" } });
   }
   const finalParams: Record<string, number> = { zWin: doc.zWin, thresh: doc.thresh };
+  applyRiskTilt(metrics); // risk-managed ranking tilt — AFTER all pass/fail; no-op unless enabled
   return { passed: true, stages, metrics, bestParams: finalParams, curves, portfolioOos: portCarry };
 }
 
@@ -965,6 +1023,7 @@ export function runGauntletOc(g: OcInputs): GauntletReport {
     metrics.composite = wf.pooledSharpe;
     stages.push({ stage: "S6oc-sealed", passed: true, durationMs: Date.now() - started, detail: { note: "no sealed window" } });
   }
+  applyRiskTilt(metrics); // risk-managed ranking tilt — AFTER all pass/fail; no-op unless enabled
   return { passed: true, stages, metrics, bestParams: { zWin: doc.zWin, thresh: doc.thresh }, curves, portfolioOos: portCarry };
 }
 
@@ -1105,6 +1164,7 @@ export function runGauntletTrend(g: TrendInputs): GauntletReport {
     stages.push({ stage: "S6tb-sealed", passed: true, durationMs: Date.now() - started, detail: { note: "no sealed window" } });
   }
   const finalParams: Record<string, number> = { smaWin: doc.smaWin };
+  applyRiskTilt(metrics); // risk-managed ranking tilt — AFTER all pass/fail; no-op unless enabled
   return { passed: true, stages, metrics, bestParams: finalParams, curves, portfolioOos: portCarry };
 }
 
@@ -1211,5 +1271,6 @@ export function runGauntletCombination(g: CombinationInputs): GauntletReport {
   const finalWeights = doc.mode === "portfolio" ? resolveWeights(doc, al.R) : [1, 0];
   const bestParams: Record<string, number> = { blocks: doc.blocks.length, leverage: doc.leverage };
   doc.blocks.forEach((_, i) => { bestParams[`w${i}`] = Math.round((finalWeights[i] ?? 0) * 1000) / 1000; });
+  applyRiskTilt(metrics); // risk-managed ranking tilt — AFTER all pass/fail; no-op unless enabled
   return { passed: true, stages, metrics, bestParams, curves, portfolioOos: portCarry };
 }
