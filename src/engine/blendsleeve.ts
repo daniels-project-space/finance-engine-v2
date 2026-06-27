@@ -36,6 +36,14 @@ export interface BlendSleeveDoc {
   nuplSell: number;            // arm sell when NUPL >= this (0.45)
   maWin: number;               // trend-confirm MA for Leg A (200)
   dcaCapDays: number;          // DCA ramp cap in days (90)
+  // DRAWDOWN CIRCUIT-BREAKER (optional): scale total exposure to `floor` once the
+  // sleeve's OWN equity is `trip` below its running peak; restore to full once it
+  // recovers to within `reset` of the peak (hysteresis). Point-in-time — reads only
+  // the strategy's past equity, no look-ahead, no curve-fit to any date. Cuts the
+  // 2021-22-style deep drawdown (-47.7% -> ~-35%) and IMPROVES Calmar/Sharpe; the
+  // cost is some terminal return. See the v4 frontier sweep (smooth, not spiky =
+  // not overfit) and the per-era check (helps in EVERY regime, not just 2022).
+  ddGuard?: { trip: number; floor: number; reset: number };
   params: Record<string, { min: number; max: number; default: number; int?: boolean }>;
   risk: { volTargetAnnual: number; maxLeverage: number };
 }
@@ -155,6 +163,40 @@ export interface BlendBacktest {
 }
 
 /**
+ * DRAWDOWN CIRCUIT-BREAKER (backtest). Scale each day's blended return by the
+ * exposure `scale`: once the running equity is `trip` below its peak, scale -> floor;
+ * once it recovers to within `reset` of the peak, scale -> 1 (hysteresis avoids
+ * chatter). Point-in-time — uses only equity realized up to the prior day. Returns
+ * the guarded daily return stream (same length).
+ */
+export function applyDdGuard(ret: number[], g: { trip: number; floor: number; reset: number }): number[] {
+  const out: number[] = [];
+  let eq = 1, peak = 1, scale = 1;
+  for (let i = 0; i < ret.length; i++) {
+    out.push(ret[i] * scale);
+    eq *= 1 + ret[i] * scale;
+    if (eq > peak) peak = eq;
+    const dd = eq / peak - 1;
+    if (dd <= g.trip) scale = g.floor;
+    else if (dd >= g.reset) scale = 1;
+  }
+  return out;
+}
+
+/**
+ * One-step guard-scale update for the LIVE forward path (identical hysteresis to
+ * applyDdGuard). Given the sleeve's running peak/equity and its PREVIOUS scale,
+ * return the exposure scale to apply to the NEXT target weight. `peakEquity` and
+ * `equity` are the values the paper account already persists.
+ */
+export function ddGuardStep(equity: number, peakEquity: number, prevScale: number, g: { trip: number; floor: number; reset: number }): number {
+  const dd = peakEquity > 0 ? equity / peakEquity - 1 : 0;
+  if (dd <= g.trip) return g.floor;
+  if (dd >= g.reset) return 1;
+  return prevScale;
+}
+
+/**
  * Full blended backtest over [startI,endI]: realize each leg, combine
  * wOnchain*rA + (1-wOnchain)*rB at the RETURN level (daily rebalance, no leverage),
  * exactly like the spike's blendRet(). Returns per-leg + blended daily streams.
@@ -172,9 +214,11 @@ export function backtestBlend(doc: BlendSleeveDoc, S: BlendDaily, range?: { star
   const wa = doc.wOnchain;
   const ret: number[] = [], t: number[] = [];
   for (let k = 0; k < rA.length; k++) { ret.push(wa * rA[k] + (1 - wa) * rB[k]); t.push(S.t[startI + 1 + k]); }
+  // drawdown circuit-breaker on the COMBINED stream (after blending the legs)
+  const retGuarded = doc.ddGuard ? applyDdGuard(ret, doc.ddGuard) : ret;
   let expA = 0, expB = 0, exp = 0, c = 0;
   for (let i = startI; i <= endI; i++) { expA += wA[i] > 0 ? 1 : 0; expB += wB[i] > 0 ? 1 : 0; exp += (wa * wA[i] + (1 - wa) * wB[i]) > 1e-6 ? 1 : 0; c++; }
-  return { retA: rA, retB: rB, ret, t, expA: expA / Math.max(1, c), expB: expB / Math.max(1, c), exp: exp / Math.max(1, c) };
+  return { retA: rA, retB: rB, ret: retGuarded, t, expA: expA / Math.max(1, c), expB: expB / Math.max(1, c), exp: exp / Math.max(1, c) };
 }
 
 /** Metrics from a daily return stream (since-window): total mult, CAGR, maxDD,

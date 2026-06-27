@@ -33,6 +33,7 @@ export const applyStep = mutation({
     ret: v.number(),
     halted: v.optional(v.boolean()),
     haltReason: v.optional(v.string()),
+    guardScale: v.optional(v.number()),
     positions: v.array(v.object({ symbol: v.string(), weight: v.number(), entryPrice: v.optional(v.number()) })),
     trades: v.array(v.object({
       symbol: v.string(), ts: v.number(), weightFrom: v.number(), weightTo: v.number(),
@@ -49,6 +50,7 @@ export const applyStep = mutation({
       halted: args.halted ?? acct.halted,
       haltReason: args.haltReason ?? acct.haltReason,
       lastStepTs: args.ts,
+      ...(args.guardScale !== undefined ? { guardScale: args.guardScale } : {}),
       updatedAt: Date.now(),
     });
     await ctx.db.insert("equitySnapshots", { candidateId: args.candidateId, ts: args.ts, equity: args.equity, ret: args.ret });

@@ -100,6 +100,9 @@ export default defineSchema({
     halted: v.boolean(),
     haltReason: v.optional(v.string()),
     lastStepTs: v.optional(v.number()),
+    // drawdown-circuit-breaker exposure scale (blend sleeve only; hysteresis state).
+    // Optional + backward-compatible: absent => treated as 1 (full exposure).
+    guardScale: v.optional(v.number()),
     updatedAt: v.number(),
   }).index("by_candidate", ["candidateId"]),
 

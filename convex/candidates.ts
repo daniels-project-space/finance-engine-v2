@@ -23,7 +23,7 @@ export const updateStage = mutation({
     id: v.id("candidates"), stage: v.string(),
     failedStage: v.optional(v.string()), failedReason: v.optional(v.string()),
     bestParams: v.optional(v.string()), metrics: v.optional(v.string()),
-    curves: v.optional(v.string()),
+    curves: v.optional(v.string()), dsl: v.optional(v.string()),
     composite: v.optional(v.number()), incubationStartedAt: v.optional(v.number()),
   },
   handler: async (ctx, { id, ...rest }) => {
