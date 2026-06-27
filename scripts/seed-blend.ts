@@ -28,6 +28,7 @@ import {
   type BlendDaily, type BlendSleeveDoc,
 } from "../src/engine/blendsleeve";
 import { blendHash, blendFamilyHash } from "../src/engine/blendsleeveGen";
+import { monteCarlo } from "../src/engine/montecarlo";
 import type { Id } from "../convex/_generated/dataModel";
 
 const COMMIT = process.argv.includes("--commit");
@@ -90,6 +91,10 @@ async function main() {
   startI = Math.max(startI < 0 ? warm : startI, warm);
   const bt = backtestBlend(DOC, Sfull, { startI });
   const m = blendMetrics(bt.ret);
+  // MONTE CARLO: stationary-bootstrap the daily return stream into 5000 alternate
+  // histories — the honest distribution of drawdown / terminal return the single
+  // historical path can't show.
+  const mc = monteCarlo(bt.ret, { n: 5000, blockMean: 15, ppy: 365, seed: 7, ddThresholds: [-0.30, -0.40, -0.50] });
   // equity curve of the blend since 2020
   const eq: number[] = []; let acc = 1; for (const r of bt.ret) { acc *= 1 + r; eq.push(acc); }
   const curve = downsampleCurve(bt.t, eq, 260);
@@ -111,6 +116,10 @@ async function main() {
   console.log(`Leg A on-chain : ${mA.finalMult.toFixed(2)}x  DD ${(mA.maxDD * 100).toFixed(1)}%  Sh ${mA.sharpe.toFixed(2)}`);
   console.log(`Leg B trend100 : ${mB.finalMult.toFixed(2)}x  DD ${(mB.maxDD * 100).toFixed(1)}%  Sh ${mB.sharpe.toFixed(2)}`);
   console.log(`BLEND 70/30    : ${m.finalMult.toFixed(2)}x (+${(m.total * 100).toFixed(0)}%)  DD ${(m.maxDD * 100).toFixed(1)}%  Sh ${m.sharpe.toFixed(2)}  Calmar ${m.calmar.toFixed(2)}  inMkt ${(bt.exp * 100).toFixed(0)}%  winRate ${(m.winRate * 100).toFixed(0)}%`);
+  console.log(`\n=== MONTE CARLO (${mc.n} stationary-bootstrap histories, block~${mc.blockMean}d) ===`);
+  console.log(`  terminal $1 ->   p5 ${mc.finalMult.p5.toFixed(1)}x | median ${mc.finalMult.p50.toFixed(1)}x | p95 ${mc.finalMult.p95.toFixed(1)}x   (historical ${mc.histFinalMult.toFixed(1)}x)`);
+  console.log(`  worst drawdown   p5 ${(mc.maxDD.p5 * 100).toFixed(0)}% (1-in-20 bad) | median ${(mc.maxDD.p50 * 100).toFixed(0)}% | p95 ${(mc.maxDD.p95 * 100).toFixed(0)}% (mild)   (historical ${(mc.histMaxDD * 100).toFixed(0)}%)`);
+  console.log(`  P(net loss) ${(mc.pLoss * 100).toFixed(1)}%   P(DD worse than -40%) ${((mc.pDDworse["-40%"] ?? 0) * 100).toFixed(1)}%   P(worse than -50%) ${((mc.pDDworse["-50%"] ?? 0) * 100).toFixed(1)}%`);
 
   // ---- 2) LIVE STATE from the engine's own bars (honest "where is it now") ----
   const bars0 = await loadBars(DOC.symbol, "1d");
@@ -139,6 +148,14 @@ async function main() {
     total: m.total, cagr: m.cagr, maxDD: m.maxDD, sharpe: m.sharpe, calmar: m.calmar,
     winRate: m.winRate, timeInMkt: bt.exp,
     curve, btcHodl,
+    // Monte-Carlo robustness (stationary-bootstrap distribution across alternate histories)
+    mc: {
+      n: mc.n, blockMean: mc.blockMean,
+      finalP5: mc.finalMult.p5, finalP50: mc.finalMult.p50, finalP95: mc.finalMult.p95,
+      ddP5: mc.maxDD.p5, ddP50: mc.maxDD.p50, ddP95: mc.maxDD.p95,
+      pLoss: mc.pLoss, pDD40: mc.pDDworse["-40%"] ?? 0, pDD50: mc.pDDworse["-50%"] ?? 0,
+      histFinal: mc.histFinalMult, histDD: mc.histMaxDD,
+    },
   };
 
   if (!COMMIT) {
@@ -157,6 +174,9 @@ async function main() {
     // OOS proxy for sorting (since-2020 Sharpe of the validated config)
     portOosSharpe: m.sharpe, wfPooledSharpe: m.sharpe,
     forwardPaper: 1, forwardPaperSeed: 1, userStrategy: 1,
+    // Monte-Carlo diagnostic (non-binding) — the distribution, not the single path
+    mcMaxDDp50: mc.maxDD.p50, mcMaxDDp05: mc.maxDD.p5,
+    mcFinalP50: mc.finalMult.p50, mcFinalP05: mc.finalMult.p5, mcPLoss: mc.pLoss,
   };
   // Find any existing blend sleeve by NAME and update IT in place (a config tweak
   // changes the content hash, so create() would otherwise insert a 2nd row — we want

@@ -12,7 +12,7 @@ import { crossoverStrategies, mutateStrategy, randomStrategy, mechanismFirstStra
 import { icFamilyWeights, icRankingText, type IcRankedRow } from "../engine/signals";
 import { SEED_LIBRARY } from "../engine/library";
 import { IMPORTED_LIBRARY } from "../engine/imports";
-import { evaluateSealed, runGauntlet, runGauntletXSection, runGauntletIv, runGauntletOc, runGauntletTrend, runGauntletCombination, setRiskObjective, type GauntletReport } from "../engine/gauntlet";
+import { evaluateSealed, runGauntlet, runGauntletXSection, runGauntletIv, runGauntletOc, runGauntletTrend, runGauntletCombination, setRiskObjective, setMonteCarlo, type GauntletReport } from "../engine/gauntlet";
 import { isCombination, type CombinationDoc } from "../engine/combination";
 import { generateCombination, validateCombination, combinationHash, combinationFamilyHash } from "../engine/combinationGen";
 import { isXSection, alignUniverse, type XSectionDoc, type XAligned } from "../engine/xsection";
@@ -151,6 +151,7 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
   // too, so the iterate lineage's best-of-lineage pick (lineageScore -> composite)
   // also prefers lower-drawdown fixes. Flag-gated + reversible; no-op when off.
   setRiskObjective(cfg.riskObjective);
+  setMonteCarlo(cfg.montecarlo); // non-binding Monte-Carlo diagnostic (no-op unless enabled)
 
   // CALIBRATION PASS: IC-steered generation. Read the persisted signal-IC report
   // once per batch; bias the GP grammar sampler toward high-IC crypto-leaf
@@ -558,6 +559,7 @@ export async function processCandidate(cx: ConvexHttpClient, candidateIdRaw: str
   // composite is byte-identical to before when riskObjective.enabled !== true. The
   // gauntlet pass/fail math is NOT touched; this only re-ranks the survivors.
   setRiskObjective(cfg.riskObjective);
+  setMonteCarlo(cfg.montecarlo); // non-binding Monte-Carlo diagnostic (no-op unless enabled)
 
   // CROSS-SECTIONAL routing: an xsection sleeve takes the adapted gauntlet path
   // (S4 cross-symbol skipped; honesty tests on the single universe-wide stream).

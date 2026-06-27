@@ -12,6 +12,7 @@
 
 import { indexOfTs, runBacktest } from "./backtest";
 import { bootstrapSharpeCI, dsr, permutationTest } from "./stats";
+import { monteCarlo } from "./montecarlo";
 import { runStress, type StressReport } from "./stress";
 import { adaptiveTrials, tune, tuneWithConfigs, type CoSymbol } from "./tune";
 import { walkForward, walkForwardPurged, type WfReport } from "./walkforward";
@@ -140,6 +141,17 @@ export interface GauntletReport {
     signalICHorizon?: number;
     /** shadow would-fail flags (logged only, never bind promotion) */
     shadowWouldFail?: string[];
+    // ---- MONTE-CARLO diagnostics (stationary-bootstrap; computed, NEVER bind) ----
+    /** median worst-drawdown across resampled histories (the typical bad path) */
+    mcMaxDDp50?: number;
+    /** 5th-percentile worst-drawdown — the 1-in-20 bad case to be prepared for */
+    mcMaxDDp05?: number;
+    /** median terminal growth-of-$1 across resampled histories */
+    mcFinalP50?: number;
+    /** 5th-percentile terminal growth-of-$1 (bad-but-plausible) */
+    mcFinalP05?: number;
+    /** probability the strategy ends the horizon at a net loss */
+    mcPLoss?: number;
   };
   /** deployed-portfolio OOS return stream for batch-level Reality Check (Feature 3); not persisted as-is */
   portfolioOos?: { t: number[]; ret: number[] };
@@ -182,6 +194,29 @@ export function setRiskObjective(cfg: RiskObjectiveCfg | null | undefined): void
  *  - higher |maxDD|      -> factor < 1 (penalty)
  *  clamped to [floor, ceil] (default [0.7, 1.15]) so the tilt is bounded and the
  *  ordering can never be pathologically inverted by the drawdown term alone. */
+// ====================================================================
+// MONTE-CARLO robustness diagnostic — NON-BINDING, computed AFTER pass/fail.
+// Mirrors the setRiskObjective/applyRiskTilt pattern: a module-level config set
+// once per run from the pipeline, and a helper that stationary-bootstraps the
+// candidate's deployed OOS return stream into a distribution of outcomes, stashing
+// a few summary numbers in `metrics`. It NEVER gates promotion (no `return fail`),
+// changes no composite/DSR/floor — purely an honesty diagnostic the dashboard shows.
+type MonteCarloCfg = { enabled: boolean; n?: number; blockMean?: number; seed?: number };
+let MONTE_CARLO: MonteCarloCfg | null = null;
+export function setMonteCarlo(cfg: MonteCarloCfg | null | undefined): void {
+  MONTE_CARLO = cfg && cfg.enabled ? cfg : null;
+}
+function attachMonteCarlo(metrics: GauntletReport["metrics"], oosRet: number[] | undefined, ppy: number): void {
+  const cfg = MONTE_CARLO;
+  if (!cfg || !cfg.enabled || !oosRet || oosRet.length < 120) return;
+  const mc = monteCarlo(oosRet, { n: cfg.n ?? 2000, blockMean: cfg.blockMean ?? 15, ppy, seed: cfg.seed ?? 7 });
+  metrics.mcMaxDDp50 = mc.maxDD.p50;
+  metrics.mcMaxDDp05 = mc.maxDD.p5;
+  metrics.mcFinalP50 = mc.finalMult.p50;
+  metrics.mcFinalP05 = mc.finalMult.p5;
+  metrics.mcPLoss = mc.pLoss;
+}
+
 function applyRiskTilt(metrics: GauntletReport["metrics"]): void {
   const cfg = RISK_OBJECTIVE;
   if (!cfg || !cfg.enabled) return;
@@ -644,6 +679,7 @@ export function runGauntlet(g: GauntletInputs): GauntletReport {
   // composite is keyed to the DEPLOYED portfolio; sealed (also portfolio) adds 0.3 later
   metrics.composite = 0.5 * (metrics.portOosSharpe ?? 0) + 0.2 * (metrics.fullSharpe ?? 0);
   applyRiskTilt(metrics); // risk-managed ranking tilt — AFTER all pass/fail; no-op unless enabled
+  attachMonteCarlo(metrics, portfolioOos.ret, opts.ppy); // non-binding MC distribution (no-op unless enabled)
   return { passed: true, stages, metrics, bestParams: finalParams, curves, portfolioOos };
 }
 
@@ -1272,5 +1308,6 @@ export function runGauntletCombination(g: CombinationInputs): GauntletReport {
   const bestParams: Record<string, number> = { blocks: doc.blocks.length, leverage: doc.leverage };
   doc.blocks.forEach((_, i) => { bestParams[`w${i}`] = Math.round((finalWeights[i] ?? 0) * 1000) / 1000; });
   applyRiskTilt(metrics); // risk-managed ranking tilt — AFTER all pass/fail; no-op unless enabled
+  attachMonteCarlo(metrics, portCarry?.ret, ppy); // non-binding MC distribution (no-op unless enabled)
   return { passed: true, stages, metrics, bestParams, curves, portfolioOos: portCarry };
 }

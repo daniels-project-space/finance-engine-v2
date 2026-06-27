@@ -119,8 +119,46 @@ function TradeRow({ tr }: { tr: { ts: number; weightFrom: number; weightTo: numb
   );
 }
 
+type Mc = { n: number; blockMean: number; finalP5: number; finalP50: number; finalP95: number; ddP5: number; ddP50: number; ddP95: number; pLoss: number; pDD40: number; pDD50: number; histFinal: number; histDD: number };
+
+function McPanel({ mc }: { mc: Mc }) {
+  const ddCol = (v: number) => (v > -0.35 ? UP : v > -0.5 ? "#f5b932" : DOWN);
+  return (
+    <Panel title={<span>Monte Carlo stress test <span className="text-faint">— {mc.n.toLocaleString()} resampled histories</span></span>}>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-px rounded-lg overflow-hidden border border-edge/60 bg-edge/30">
+        <div className="bg-ink p-4">
+          <div className="hud mb-2">worst drawdown</div>
+          <div className="num text-[22px] leading-none" style={{ color: ddCol(mc.ddP5) }}>{pct(mc.ddP5, 0)}</div>
+          <div className="num text-[9px] text-dim mt-1.5">1-in-20 bad case</div>
+          <div className="num text-[10px] text-mid mt-2.5">median {pct(mc.ddP50, 0)} · mild {pct(mc.ddP95, 0)}</div>
+          <div className="num text-[9px] text-faint mt-1">historical {pct(mc.histDD, 0)}</div>
+        </div>
+        <div className="bg-ink p-4">
+          <div className="hud mb-2">terminal · growth of $1</div>
+          <div className="num text-[22px] leading-none text-fg">{mc.finalP50.toFixed(1)}×</div>
+          <div className="num text-[9px] text-dim mt-1.5">median outcome</div>
+          <div className="num text-[10px] text-mid mt-2.5">p5 {mc.finalP5.toFixed(1)}× · p95 {mc.finalP95.toFixed(1)}×</div>
+          <div className="num text-[9px] text-faint mt-1">historical {mc.histFinal.toFixed(1)}×</div>
+        </div>
+        <div className="bg-ink p-4">
+          <div className="hud mb-2">tail risk</div>
+          <div className="num text-[22px] leading-none" style={{ color: mc.pLoss < 0.05 ? UP : "#f5b932" }}>{pct(mc.pLoss, 1)}</div>
+          <div className="num text-[9px] text-dim mt-1.5">chance of a net loss</div>
+          <div className="num text-[10px] text-mid mt-2.5">DD &lt; −40%: {pct(mc.pDD40, 1)}</div>
+          <div className="num text-[10px] text-mid mt-1">DD &lt; −50%: {pct(mc.pDD50, 1)}</div>
+        </div>
+      </div>
+      <div className="num text-[10px] text-dim leading-relaxed mt-3">
+        The historical −{Math.abs(mc.histDD * 100).toFixed(0)}% is one draw of luck. Resampling the daily returns in blocks (keeping momentum and volatility clustering) across {mc.n.toLocaleString()} alternate histories, the drawdown stays shallower than {pct(mc.ddP5, 0)} about 95% of the time, and a net loss over the full run happens in {pct(mc.pLoss, 1)} of them. Honest limit: the bootstrap can’t invent a regime worse than anything in 2020–2025, so this is a <span className="text-mid">floor</span> on tail risk, not a ceiling.
+      </div>
+    </Panel>
+  );
+}
+
 export default function WatchPage() {
   const paper = useQuery(api.dashboard.paperBook, {});
+  const my = useQuery(api.dashboard.myStrategies, {});
+  const mc = ((my?.strategies as { key: string; mc?: Mc }[] | undefined)?.find((s) => s.key === "blend7030")?.mc) as Mc | undefined;
   const blend = paper?.sleeves?.find((s) => s.source === "blend");
   const id = blend?.id as string | undefined;
   const trades = useQuery(api.paper.recentTrades, id ? { candidateId: id as never, limit: 120 } : "skip");
@@ -226,6 +264,8 @@ export default function WatchPage() {
           </div>
         </Panel>
       </div>
+
+      {mc && <McPanel mc={mc} />}
 
       <div className="num text-[10px] text-dim text-center pt-1">
         Live forward paper-trade of the smart-exit blend — simulated, no real money. The chart price is the live OKX feed; trades, position and equity come from the engine’s hourly paper step and update automatically.

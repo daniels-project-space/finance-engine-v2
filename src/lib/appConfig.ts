@@ -47,6 +47,10 @@ export interface AppConfig {
    *  that scores neutral (factor 1); weight scales the tilt; the factor is clamped to
    *  [floor, ceil] so a big Sharpe edge still dominates (tilt, not takeover). */
   riskObjective?: { enabled: boolean; targetDD?: number; weight?: number; floor?: number; ceil?: number };
+  /** MONTE-CARLO robustness diagnostic: stationary-bootstrap the candidate's OOS
+   *  return stream into a distribution of outcomes (terminal return, worst-drawdown,
+   *  P(loss)). NON-BINDING — computed + stored for the dashboard, never gates. */
+  montecarlo?: { enabled: boolean; n?: number; blockMean?: number; seed?: number };
   /** ON-CHAIN feature inputs (Coin Metrics community + DefiLlama, daily BTC/ETH).
    *  When enabled, on-chain features are attached to the primary bars so strategies
    *  can use mvrv/activeaddr/txcnt/nvt/exnetflow/stablesupply DSL ops. */
@@ -194,6 +198,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   toolkit: { enabled: false, composeShare: 0.2 },
   // RISK-MANAGED GENERATION OBJECTIVE DEFAULT OFF in code; shipped ON via the live override (reversible).
   riskObjective: { enabled: false, targetDD: 0.30, weight: 0.5, floor: 0.7, ceil: 1.15 },
+  // MONTE-CARLO diagnostic DEFAULT OFF in code; shipped ON via the live override.
+  montecarlo: { enabled: false, n: 2000, blockMean: 15, seed: 7 },
   // ON-CHAIN features DEFAULT OFF in code; shipped ON via the live override.
   onchain: { enabled: false },
   primarySymbol: "BTC/USDT",
