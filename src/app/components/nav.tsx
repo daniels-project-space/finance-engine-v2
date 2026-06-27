@@ -3,12 +3,14 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-// THREE plain tabs, each answering one obvious question:
-//  Live       — how are my strategies doing right now?
-//  Strategies — what are the best strategies, do they beat just holding?
-//  Engine     — is the discovery engine working, and what's it finding?
+// Plain tabs, each answering one obvious question:
+//  Live          — how are my strategies doing right now?
+//  My Strategies — Daniel's validated strategies (description + since-2020 + chart)
+//  Strategies    — what are the best strategies, do they beat just holding?
+//  Engine        — is the discovery engine working, and what's it finding?
 const PRIMARY: { href: string; label: string; glow?: boolean }[] = [
   { href: "/", label: "Live", glow: true },
+  { href: "/my-strategies", label: "My Strategies" },
   { href: "/strategies", label: "Strategies" },
   { href: "/engine", label: "Engine" },
 ];

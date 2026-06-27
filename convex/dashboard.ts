@@ -353,6 +353,21 @@ export const benchmarks = query({
 });
 
 /**
+ * MY STRATEGIES — Daniel's validated strategies for the "My Strategies" tab. Reads
+ * a single persisted config row (key "my_strategies") computed by the spike backtest
+ * (since-2020 equity curves + metrics + per-strategy BTC HODL overlay + plain-English
+ * descriptions). Read-only, additive — no engine/gauntlet involvement.
+ */
+export const myStrategies = query({
+  args: {},
+  handler: async (ctx) => {
+    const row = await ctx.db.query("config").withIndex("by_key", (q) => q.eq("key", "my_strategies")).first();
+    if (!row) return null;
+    try { return JSON.parse(row.json) as { generatedAt: number; strategies: unknown[] }; } catch { return null; }
+  },
+});
+
+/**
  * USER STRATEGIES — Daniel's hand-built regime strategies (source "regime" /
  * userStrategy), returned EXPLICITLY regardless of composite rank so the SOL hero
  * is never buried below the by-composite cutoff. Read-only; returns full rows
