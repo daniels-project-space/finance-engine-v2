@@ -30,7 +30,11 @@ function block(rng: () => number, symbol: string): Block {
  */
 export function generateCombination(seed: number): CombinationDoc {
   const rng = mulberry32(seed);
-  const mode: CombineMode = rng() < 0.65 ? "portfolio" : "overlay";  // mostly portfolios (the proven lever)
+  // REFINEMENT (2026-06-27, data-driven): the OVERLAYS are what pass the gauntlet to
+  // incubation (Sharpe 1.24-1.29) — a single base signal gated by a regime is simpler
+  // and generalizes better than a multi-block portfolio (all blocks must work). So
+  // favor overlays now (60/40) instead of the old portfolio-heavy 35/65.
+  const mode: CombineMode = rng() < 0.40 ? "portfolio" : "overlay";
 
   if (mode === "overlay") {
     // base block × gate block (regime agreement). Use two different coins/params so
