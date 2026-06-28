@@ -243,3 +243,43 @@ export function blendTargetNow(doc: BlendSleeveDoc, bars: Bars): {
   const weight = doc.wOnchain * legAW + (1 - doc.wOnchain) * legBW;
   return { lastTs: S.t[i], lastClose: S.close[i], legAW, legBW, weight };
 }
+
+/** One point of the blend's decision-time history (for the live /watch chart). */
+export interface BlendTrackPoint {
+  t: number;        // day timestamp (ms)
+  close: number;    // close that day
+  nupl: number;     // on-chain valuation feature (1 - 1/MVRV), point-in-time
+  ma: number;       // 200d MA (maWin), point-in-time
+  sma: number;      // Leg-B trend SMA (smaWin), point-in-time
+  legA: number;     // Leg-A on-chain target weight [0,1]
+  legB: number;     // Leg-B trend weight {0,1}
+  weight: number;   // combined target weight = wOnchain*legA + (1-wOnchain)*legB
+}
+
+/**
+ * Full per-day decision history for the blend — every indicator the strategy uses
+ * to size exposure, plus the resulting leg + combined weights, computed exactly like
+ * blendTargetNow but kept for ALL days (not just the latest). This is what the Watch
+ * tab plots: NUPL vs its buy/sell trigger lines, price vs the 200d MA and the trend
+ * SMA, and the target-weight ramp. Point-in-time throughout (buildBlendDaily lags the
+ * NUPL + MA one bar). Returns [] until there is enough warm-up history.
+ */
+export function blendTrack(doc: BlendSleeveDoc, bars: Bars): BlendTrackPoint[] {
+  const S = buildBlendDaily(bars, doc.maWin);
+  const n = S.t.length;
+  const warm = Math.max(doc.smaWin, doc.maWin) + 2;
+  if (n < warm + 1) return [];
+  const wA = legAWeights(S, doc, warm, n - 1);
+  const out: BlendTrackPoint[] = [];
+  for (let i = warm; i <= n - 1; i++) {
+    const sma = smaAt(S.close, i, doc.smaWin);
+    const legB = Number.isFinite(sma) && S.close[i] >= sma ? 1 : 0;
+    const legA = wA[i];
+    out.push({
+      t: S.t[i], close: S.close[i], nupl: S.nupl[i], ma: S.ma[i],
+      sma: Number.isFinite(sma) ? sma : S.close[i], legA, legB,
+      weight: doc.wOnchain * legA + (1 - doc.wOnchain) * legB,
+    });
+  }
+  return out;
+}

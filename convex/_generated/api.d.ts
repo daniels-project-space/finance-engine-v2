@@ -17,6 +17,7 @@ import type * as pipeline from "../pipeline.js";
 import type * as premium from "../premium.js";
 import type * as promotions from "../promotions.js";
 import type * as signalIc from "../signalIc.js";
+import type * as watch from "../watch.js";
 
 import type {
   ApiFromModules,
@@ -34,6 +35,7 @@ declare const fullApi: ApiFromModules<{
   premium: typeof premium;
   promotions: typeof promotions;
   signalIc: typeof signalIc;
+  watch: typeof watch;
 }>;
 
 /**

@@ -125,6 +125,17 @@ export default defineSchema({
     ret: v.number(),
   }).index("by_candidate_ts", ["candidateId", "ts"]),
 
+  // Precomputed indicator track for the live Watch tab — one row per candidate,
+  // rebuilt by the indicators Trigger task (which has R2 + on-chain access) so the
+  // page can read the full chart (daily candles + indicator series + the exact
+  // trigger lines) reactively without any heavy compute in a Convex query.
+  // `json` is a serialized StrategyIndicators (src/engine/indicators.ts).
+  strategyIndicators: defineTable({
+    candidateId: v.id("candidates"),
+    updatedAt: v.number(),
+    json: v.string(),
+  }).index("by_candidate", ["candidateId"]),
+
   datasets: defineTable({
     symbol: v.string(),
     tf: v.string(),

@@ -20,6 +20,7 @@
     "ccxt": "^4.5.59",
     "convex": "^1.17.0",
     "fflate": "^0.8.2",
+    "lightweight-charts": "^4.2.3",
     "next": "^15.3.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

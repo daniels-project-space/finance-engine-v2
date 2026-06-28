@@ -1,25 +1,32 @@
 "use client";
 
 // ================================================================ WATCH
-// Live paper-trading terminal for the smart-exit blend. A streaming BTC candle
-// chart (1m, the right-most bar moves every couple seconds) on the left, and a
-// live trade log on the right that fills in the moment the strategy acts. Reactive:
-// the log + equity update automatically when the hourly paper step runs. The price
-// stream is the OKX public feed via /api/livestream. Read-only, honest.
+// Live paper-trading cockpit. For the SELECTED strategy it shows:
+//   • the daily price chart with the exact indicators it trades on + the trigger
+//     lines + a ▲/▼ at every trade (SignalChart),
+//   • a live metric strip under the chart (return / CAGR / win-rate / Sharpe / maxDD /
+//     time-in-market) tracked since the strategy went live — 0 at the start, moving
+//     with every trade,
+//   • its return vs BTC-HODL and the S&P 500 from the same start (ChartWithBenchmarks),
+//   • a streaming 1-minute BTC tape (the "live now" view) and the running trade log.
+// A picker switches strategies — each renders its OWN indicators/logic. All live data
+// is reactive Convex; the 1m tape is the OKX public feed. Read-only, honest.
 
 import { useQuery } from "convex/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../../convex/_generated/api";
-import { Lead, Panel, pct, type Curve } from "../components/ds";
-import { Chart } from "../components/ds";
+import type { Id } from "../../../convex/_generated/dataModel";
+import { Lead, Panel, pct, ChartWithBenchmarks, type Curve } from "../components/ds";
+import { SignalChart, type TradeMarker } from "../components/SignalChart";
 
 type Candle = { t: number; o: number; h: number; l: number; c: number };
-const UP = "#3ddb9e", DOWN = "#fb6f5d", INFO = "#5cc8ff", DIM = "#586573";
+const UP = "#3ddb9e", DOWN = "#fb6f5d", INFO = "#5cc8ff", DIM = "#586573", AMBER = "#f5b932";
 const usd = (n: number, d = 0) => "$" + n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
 const hm = (ts: number) => { const d = new Date(ts); return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`; };
 const dmy = (ts: number) => { const d = new Date(ts); return `${d.getUTCDate()} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()]}`; };
+const dur = (days: number) => (days < 1 ? `${(days * 24).toFixed(days * 24 < 10 ? 1 : 0)}h` : `${days.toFixed(days < 10 ? 1 : 0)}d`);
 
-// poll the live 1-minute candle stream
+// poll the live 1-minute candle stream (the "live now" tape)
 function useLiveStream() {
   const [d, setD] = useState<{ candles: Candle[]; last: number | null; ts: number }>({ candles: [], last: null, ts: 0 });
   useEffect(() => {
@@ -32,13 +39,13 @@ function useLiveStream() {
   return d;
 }
 
-// ---------------------------------------------------------------- candlesticks
-function LiveCandles({ candles, last, markers, height = 380 }: {
+// ---------------------------------------------------------------- live 1m tape (SVG)
+function LiveCandles({ candles, last, markers, height = 220 }: {
   candles: Candle[]; last: number | null; markers: { ts: number; buy: boolean }[]; height?: number;
 }) {
   const cs = candles.filter((c) => [c.o, c.h, c.l, c.c].every(Number.isFinite));
   if (cs.length < 2) return <div className="well flex items-center justify-center" style={{ height }}><span className="hud">connecting to the live feed…</span></div>;
-  const W = 860, padL = 6, padR = 70, padT = 14, padB = 22;
+  const W = 860, padL = 6, padR = 70, padT = 12, padB = 20;
   const plotW = W - padL - padR, plotH = height - padT - padB;
   let lo = Infinity, hi = -Infinity;
   for (const c of cs) { lo = Math.min(lo, c.l); hi = Math.max(hi, c.h); }
@@ -64,7 +71,6 @@ function LiveCandles({ candles, last, markers, height = 380 }: {
       {[t0, (t0 + t1) / 2, t1].map((ts, i) => (
         <text key={i} x={i === 0 ? padL : i === 2 ? W - padR : W / 2 - padR / 2} y={height - 6} textAnchor={i === 0 ? "start" : i === 2 ? "end" : "middle"} fontSize="8.5" fill={DIM} fontFamily="var(--font-mono)">{hm(ts)}</text>
       ))}
-      {/* candles */}
       {cs.map((c, i) => {
         const up = c.c >= c.o, col = up ? UP : DOWN, x = cx(i);
         const yo = Y(c.o), yc = Y(c.c), bodyTop = Math.min(yo, yc), bodyH = Math.max(1, Math.abs(yc - yo));
@@ -75,8 +81,7 @@ function LiveCandles({ candles, last, markers, height = 380 }: {
           </g>
         );
       })}
-      {/* trade markers inside the visible window */}
-      {markers.filter((m) => m.ts >= t0 - step * 60_000 && m.ts <= t1 + 60_000).map((m, i) => {
+      {markers.filter((m) => m.ts >= t0 - 60_000 && m.ts <= t1 + 60_000).map((m, i) => {
         const x = xOfTs(m.ts), y = m.buy ? height - padB - 2 : padT + 2, col = m.buy ? UP : DOWN;
         const tri = m.buy ? `${x},${y - 7} ${x - 5},${y} ${x + 5},${y}` : `${x},${y + 7} ${x - 5},${y} ${x + 5},${y}`;
         return (
@@ -86,7 +91,6 @@ function LiveCandles({ candles, last, markers, height = 380 }: {
           </g>
         );
       })}
-      {/* live price line + tag */}
       {last != null && (
         <g>
           <line x1={padL} x2={W - padR} y1={Y(last)} y2={Y(last)} stroke={lastUp ? UP : DOWN} strokeWidth="1" strokeDasharray="3 3" opacity={0.9} />
@@ -98,8 +102,40 @@ function LiveCandles({ candles, last, markers, height = 380 }: {
   );
 }
 
+// ---------------------------------------------------------------- metric tile
+function Tile({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
+  return (
+    <div className="bg-ink p-3.5">
+      <div className="hud mb-1.5">{label}</div>
+      <div className="num text-[19px] leading-none" style={{ color: color ?? "#e2e8f0" }}>{value}</div>
+      {sub && <div className="num text-[9px] text-dim mt-1.5">{sub}</div>}
+    </div>
+  );
+}
+
+type Metrics = {
+  totalReturn: number; cagr: number | null; maxDD: number; sharpe: number | null; winRate: number | null;
+  trades: number; closedTrades: number; wins: number; losses: number; daysLive: number; timeInMarket: number; equity: number;
+};
+
+function MetricStrip({ m }: { m: Metrics }) {
+  const sign = (v: number) => (v >= 0 ? "+" : "");
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-px rounded-xl overflow-hidden border border-edge bg-edge/40">
+      <Tile label="return · live" value={`${sign(m.totalReturn)}${pct(m.totalReturn, 2)}`} sub="since it went live" color={m.totalReturn >= 0 ? UP : DOWN} />
+      <Tile label="CAGR" value={m.cagr == null ? "—" : `${sign(m.cagr)}${pct(m.cagr, 1)}`} sub={m.cagr == null ? `after 14d (${dur(m.daysLive)})` : "annualized"} color={m.cagr == null ? DIM : m.cagr >= 0 ? UP : DOWN} />
+      <Tile label="win rate" value={m.winRate == null ? "—" : pct(m.winRate, 0)} sub={m.closedTrades ? `${m.wins}/${m.closedTrades} closed` : "no closed trades"} color={m.winRate == null ? DIM : m.winRate >= 0.5 ? UP : AMBER} />
+      <Tile label="Sharpe · fwd" value={m.sharpe == null ? "—" : m.sharpe.toFixed(2)} sub={m.sharpe == null ? "building…" : "annualized"} color={m.sharpe == null ? DIM : m.sharpe >= 1 ? UP : "#e2e8f0"} />
+      <Tile label="max drawdown" value={pct(m.maxDD, 1)} sub="live peak-to-trough" color={m.maxDD > -0.15 ? "#e2e8f0" : m.maxDD > -0.3 ? AMBER : DOWN} />
+      <Tile label="trades" value={`${m.trades}`} sub={`${m.closedTrades} round-trips`} />
+      <Tile label="time in market" value={pct(m.timeInMarket, 0)} sub="rest in cash" color={INFO} />
+      <Tile label="days live" value={dur(m.daysLive)} sub="forward-testing" />
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------- trade log row
-function TradeRow({ tr }: { tr: { ts: number; weightFrom: number; weightTo: number; price: number; costUsd: number; note?: string } }) {
+function TradeRow({ tr }: { tr: { ts: number; weightFrom: number; weightTo: number; price: number; costUsd: number; reason: string } }) {
   const buy = tr.weightTo > tr.weightFrom;
   const flat = Math.abs(tr.weightTo) < 1e-6;
   const col = flat ? DOWN : buy ? UP : DOWN;
@@ -110,63 +146,53 @@ function TradeRow({ tr }: { tr: { ts: number; weightFrom: number; weightTo: numb
         <div className="text-mid">{hm(tr.ts)}</div>
         <div className="text-faint">{dmy(tr.ts)}</div>
       </div>
-      <div className="shrink-0 num text-[10px] font-semibold px-1.5 py-0.5 rounded" style={{ color: col, background: col + "1a" }}>{label}</div>
+      <div className="shrink-0 num text-[10px] font-semibold px-1.5 py-0.5 rounded self-start" style={{ color: col, background: col + "1a" }}>{label}</div>
       <div className="min-w-0 flex-1 num text-[11px] leading-tight">
-        <div className="text-fg">{pct(tr.weightFrom, 0)} → <span style={{ color: col }}>{pct(tr.weightTo, 0)}</span></div>
-        <div className="text-dim text-[10px] mt-0.5">@ {usd(tr.price)} · {usd(Math.abs(tr.costUsd), 2)} cost</div>
+        <div className="text-fg">{pct(tr.weightFrom, 0)} → <span style={{ color: col }}>{pct(tr.weightTo, 0)}</span> <span className="text-faint">@ {usd(tr.price)}</span></div>
+        <div className="text-dim text-[10px] mt-0.5">{tr.reason}</div>
       </div>
     </div>
   );
 }
 
-type Mc = { n: number; blockMean: number; finalP5: number; finalP50: number; finalP95: number; ddP5: number; ddP50: number; ddP95: number; pLoss: number; pDD40: number; pDD50: number; histFinal: number; histDD: number };
-
-function McPanel({ mc }: { mc: Mc }) {
-  const ddCol = (v: number) => (v > -0.35 ? UP : v > -0.5 ? "#f5b932" : DOWN);
+// ---------------------------------------------------------------- strategy picker
+function StrategyPicker({ list, value, onChange }: {
+  list: { id: string; name: string; family: string; symbol: string; primary: boolean }[];
+  value: string | undefined; onChange: (id: string) => void;
+}) {
+  if (!list.length) return null;
   return (
-    <Panel title={<span>Monte Carlo stress test <span className="text-faint">— {mc.n.toLocaleString()} resampled histories</span></span>}>
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-px rounded-lg overflow-hidden border border-edge/60 bg-edge/30">
-        <div className="bg-ink p-4">
-          <div className="hud mb-2">worst drawdown</div>
-          <div className="num text-[22px] leading-none" style={{ color: ddCol(mc.histDD) }}>{pct(mc.histDD, 0)}</div>
-          <div className="num text-[9px] text-dim mt-1.5">actual · since 2020</div>
-          <div className="num text-[10px] text-mid mt-2.5">stress test: typical {pct(mc.ddP50, 0)}</div>
-          <div className="num text-[10px] text-mid mt-1">1-in-20 bad case {pct(mc.ddP5, 0)}</div>
-        </div>
-        <div className="bg-ink p-4">
-          <div className="hud mb-2">terminal · growth of $1</div>
-          <div className="num text-[22px] leading-none text-fg">{mc.finalP50.toFixed(1)}×</div>
-          <div className="num text-[9px] text-dim mt-1.5">median outcome</div>
-          <div className="num text-[10px] text-mid mt-2.5">p5 {mc.finalP5.toFixed(1)}× · p95 {mc.finalP95.toFixed(1)}×</div>
-          <div className="num text-[9px] text-faint mt-1">historical {mc.histFinal.toFixed(1)}×</div>
-        </div>
-        <div className="bg-ink p-4">
-          <div className="hud mb-2">tail risk</div>
-          <div className="num text-[22px] leading-none" style={{ color: mc.pLoss < 0.05 ? UP : "#f5b932" }}>{pct(mc.pLoss, 1)}</div>
-          <div className="num text-[9px] text-dim mt-1.5">chance of a net loss</div>
-          <div className="num text-[10px] text-mid mt-2.5">DD &lt; −40%: {pct(mc.pDD40, 1)}</div>
-          <div className="num text-[10px] text-mid mt-1">DD &lt; −50%: {pct(mc.pDD50, 1)}</div>
-        </div>
-      </div>
-      <div className="num text-[10px] text-dim leading-relaxed mt-3">
-        The historical −{Math.abs(mc.histDD * 100).toFixed(0)}% is one draw of luck. Resampling the daily returns in blocks (keeping momentum and volatility clustering) across {mc.n.toLocaleString()} alternate histories, the drawdown stays shallower than {pct(mc.ddP5, 0)} about 95% of the time, and a net loss over the full run happens in {pct(mc.pLoss, 1)} of them. Honest limit: the bootstrap can’t invent a regime worse than anything in 2020–2025, so this is a <span className="text-mid">floor</span> on tail risk, not a ceiling.
-      </div>
-    </Panel>
+    <div className="flex items-center gap-2 flex-wrap">
+      <span className="hud">watching</span>
+      <select
+        value={value ?? ""}
+        onChange={(e) => onChange(e.target.value)}
+        className="num text-[12px] bg-ink border border-edge rounded-lg px-3 py-1.5 text-fg outline-none focus:border-info/60 cursor-pointer"
+      >
+        {list.map((s) => (
+          <option key={s.id} value={s.id}>
+            {s.primary ? "★ " : ""}{s.family} · {s.symbol.replace("/USDT", "")} — {s.name}
+          </option>
+        ))}
+      </select>
+    </div>
   );
 }
 
 export default function WatchPage() {
-  const paper = useQuery(api.dashboard.paperBook, {});
-  const my = useQuery(api.dashboard.myStrategies, {});
-  const mc = ((my?.strategies as { key: string; mc?: Mc }[] | undefined)?.find((s) => s.key === "blend7030")?.mc) as Mc | undefined;
-  const blend = paper?.sleeves?.find((s) => s.source === "blend");
-  const id = blend?.id as string | undefined;
-  const trades = useQuery(api.paper.recentTrades, id ? { candidateId: id as never, limit: 120 } : "skip");
-  const snaps = useQuery(api.paper.snapshots, id ? { candidateId: id as never, limit: 1500 } : "skip");
-  const positions = useQuery(api.paper.positionsFor, id ? { candidateId: id as never } : "skip");
+  const strategies = useQuery(api.watch.liveStrategies, {});
+  const [sel, setSel] = useState<string | undefined>(undefined);
+  // default to the starred (BTC 70/30 blend) or the first available strategy
+  useEffect(() => {
+    if (sel || !strategies?.length) return;
+    setSel((strategies.find((s) => s.primary) ?? strategies[0]).id);
+  }, [strategies, sel]);
+
+  const state = useQuery(api.watch.liveState, sel ? { candidateId: sel as Id<"candidates"> } : "skip");
+  const bench = useQuery(api.dashboard.benchmarks, {});
   const stream = useLiveStream();
 
-  // price flash direction
+  // live price flash direction
   const prev = useRef<number | null>(null);
   const [dir, setDir] = useState<0 | 1 | -1>(0);
   useEffect(() => {
@@ -175,100 +201,120 @@ export default function WatchPage() {
     prev.current = stream.last;
   }, [stream.last]);
 
-  if (paper && !blend) {
-    return <div className="py-20 text-center"><div className="text-[18px] text-mid">The blend sleeve isn’t in the paper book yet.</div><div className="num text-[12px] text-dim mt-2">It’s seeded on the next paper step.</div></div>;
-  }
+  const markers: TradeMarker[] = useMemo(
+    () => (state?.trades ?? []).map((t) => ({ ts: t.ts, buy: t.weightTo > t.weightFrom, reason: t.reason })),
+    [state?.trades],
+  );
+  const tapeMarkers = useMemo(() => (state?.trades ?? []).map((t) => ({ ts: t.ts, buy: t.weightTo > t.weightFrom })), [state?.trades]);
+  const eqCurve: Curve | undefined = state && state.equity.t.length > 1 ? { t: state.equity.t, eq: state.equity.eq } : undefined;
 
-  const weight = positions?.[0]?.weight ?? 0;
-  const inMarket = Math.abs(weight) > 0.02;
-  const equity = blend?.equity ?? 10000;
-  const ret = blend?.ret ?? 0;
-  const days = blend?.days ?? 0;
-  const chron = (snaps ?? []).slice().reverse();
-  const eqCurve: Curve | undefined = chron.length > 1 ? { t: chron.map((s) => s.ts), eq: chron.map((s) => s.equity / 10000) } : undefined;
-  const markers = (trades ?? []).map((t) => ({ ts: t.ts, buy: t.weightTo > t.weightFrom }));
   const priceCol = dir === 1 ? UP : dir === -1 ? DOWN : "#e2e8f0";
+  const m = state?.metrics;
+  const inMarket = state ? Math.abs(state.meta.currentWeight) > 0.02 : false;
 
   return (
     <div className="space-y-5">
       <Lead dot="live" tone="fg">
-        Watching <span className="blue-glow-text font-semibold">On-chain + trend blend (70/30)</span> trade live on paper —
-        the BTC bar streams in real time, every trade lands in the log as it happens.
+        Watching <span className="blue-glow-text font-semibold">{state?.meta.family ?? "your best strategy"}</span> trade live on paper —
+        its real indicators, the lines where it fires, every trade marked, and how it stacks up against just holding.
       </Lead>
+
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <StrategyPicker list={strategies ?? []} value={sel} onChange={setSel} />
+        <div className="num text-[10px] text-dim">simulated · no real money{state?.meta.indicatorsAsOf ? ` · indicators ${dmy(state.meta.indicatorsAsOf)} ${hm(state.meta.indicatorsAsOf)}` : ""}</div>
+      </div>
 
       {/* live status strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-px rounded-xl overflow-hidden border border-edge bg-edge/40">
         <div className="bg-ink p-4">
-          <div className="hud mb-1.5">BTC price · live</div>
-          <div className="num text-[26px] leading-none tabular-nums transition-colors duration-300" style={{ color: priceCol }}>
+          <div className="hud mb-1.5">{(state?.meta.symbol ?? "BTC/USDT").replace("/USDT", "")} price · live</div>
+          <div className="num text-[24px] leading-none tabular-nums transition-colors duration-300" style={{ color: priceCol }}>
             {stream.last != null ? usd(stream.last) : "—"}
             <span className="inline-block w-1.5 h-1.5 rounded-full ml-2 align-middle live-dot" style={{ background: priceCol }} />
           </div>
-          <div className="num text-[9px] text-dim mt-1.5">OKX · updates every ~2.5s</div>
+          <div className="num text-[9px] text-dim mt-1.5">OKX · ~2.5s</div>
         </div>
         <div className="bg-ink p-4">
           <div className="hud mb-1.5">position now</div>
-          <div className="num text-[20px] leading-none" style={{ color: inMarket ? UP : DIM }}>{inMarket ? `LONG ${pct(weight, 0)}` : "CASH"}</div>
+          <div className="num text-[18px] leading-none" style={{ color: inMarket ? UP : DIM }}>{inMarket ? `${state!.meta.position} ${pct(state!.meta.currentWeight, 0)}` : "CASH"}</div>
           <div className="num text-[9px] text-dim mt-2">{inMarket ? "in the market" : "waiting for a signal"}</div>
         </div>
         <div className="bg-ink p-4">
           <div className="hud mb-1.5">paper equity</div>
-          <div className="num text-[20px] leading-none text-fg">{usd(equity)}</div>
-          <div className="num text-[9px] mt-2" style={{ color: ret >= 0 ? UP : DOWN }}>{ret >= 0 ? "+" : ""}{pct(ret, 2)} since start</div>
+          <div className="num text-[18px] leading-none text-fg">{usd(state?.meta.equity ?? 10000)}</div>
+          <div className="num text-[9px] mt-2" style={{ color: (m?.totalReturn ?? 0) >= 0 ? UP : DOWN }}>{(m?.totalReturn ?? 0) >= 0 ? "+" : ""}{pct(m?.totalReturn ?? 0, 2)} since start</div>
         </div>
         <div className="bg-ink p-4">
           <div className="hud mb-1.5">trades made</div>
-          <div className="num text-[20px] leading-none text-fg">{trades?.length ?? 0}</div>
-          <div className="num text-[9px] text-dim mt-2">{days >= 1 ? `${days.toFixed(0)}d` : `${(days * 24).toFixed(0)}h`} forward-testing</div>
+          <div className="num text-[18px] leading-none text-fg">{m?.trades ?? 0}</div>
+          <div className="num text-[9px] text-dim mt-2">{dur(m?.daysLive ?? 0)} forward-testing</div>
         </div>
         <div className="bg-ink p-4 col-span-2 sm:col-span-1">
           <div className="hud mb-1.5">status</div>
-          <div className="num text-[14px] leading-tight" style={{ color: blend?.halted ? DOWN : UP }}>{blend?.halted ? "halted" : "live · paper"}</div>
-          <div className="num text-[9px] text-dim mt-2">simulated — no real money</div>
+          <div className="num text-[14px] leading-tight" style={{ color: state?.meta.halted ? DOWN : UP }}>{state?.meta.halted ? "halted" : "live · paper"}</div>
+          <div className="num text-[9px] text-dim mt-2">starts at $10,000</div>
         </div>
       </div>
 
-      {/* chart + log */}
+      {/* signal chart — the indicators + trigger lines + trade marks */}
+      <Panel title={
+        <span>
+          {(state?.meta.symbol ?? "BTC/USDT").replace("/USDT", "")} · daily · the indicators this strategy trades on
+          <span className="text-faint"> — ▲ buy / ▼ sell mark each trade; dashed lines are the trigger levels</span>
+        </span>
+      }>
+        <SignalChart data={state?.indicators ?? null} markers={markers} height={380} />
+        {state?.meta.logic && <div className="num text-[10.5px] text-dim leading-relaxed mt-3 border-t border-edge/40 pt-3"><span className="text-mid">How it decides:</span> {state.meta.logic}</div>}
+      </Panel>
+
+      {/* live metrics — under the chart, 0 at the start, moving with every trade */}
+      {m ? <MetricStrip m={m} /> : <div className="well h-20 flex items-center justify-center"><span className="hud">loading live metrics…</span></div>}
+
+      {/* return vs benchmarks + trade log */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        <div className="lg:col-span-2 space-y-5">
-          <Panel title={<span>BTC / USDT · 1-minute · live <span className="text-faint">— green/red triangles mark this strategy’s trades</span></span>}>
-            <LiveCandles candles={stream.candles} last={stream.last} markers={markers} />
-          </Panel>
-          <Panel title="this strategy’s paper equity (its own P&L since it went live)">
+        <div className="lg:col-span-2">
+          <Panel title={<span>return since it went live <span className="text-faint">— this strategy vs holding BTC vs the S&amp;P 500</span></span>}>
             {eqCurve ? (
-              <Chart series={[{ name: "blend paper", color: INFO, curve: eqCurve }]} height={150} yLabel="growth of $1" />
+              <ChartWithBenchmarks
+                series={[{ name: "this strategy", color: INFO, curve: eqCurve }]}
+                benchmarks={bench ?? null}
+                height={230}
+                yLabel="growth of $1"
+                showMetrics
+                stratLabel={state?.meta.family ?? "strategy"}
+                ppy={365}
+              />
             ) : (
-              <div className="well flex items-center justify-center" style={{ height: 150 }}>
-                <span className="hud">equity line starts once the first paper steps record — it’s flat at $10,000 while in cash</span>
+              <div className="well flex items-center justify-center" style={{ height: 230 }}>
+                <span className="hud">the curve starts at $1 the moment it goes live — flat while in cash, then it tracks vs BTC-HODL &amp; the S&amp;P 500</span>
               </div>
             )}
           </Panel>
         </div>
 
-        {/* trade log */}
-        <Panel title={<span>trade log <span className="text-faint">— newest first</span></span>} className="lg:max-h-[620px] flex flex-col">
-          <div className="overflow-y-auto -mx-1 px-1" style={{ maxHeight: 560 }}>
-            {trades === undefined ? (
+        <Panel title={<span>trade log <span className="text-faint">— newest first</span></span>} className="lg:max-h-[560px] flex flex-col">
+          <div className="overflow-y-auto -mx-1 px-1" style={{ maxHeight: 500 }}>
+            {state === undefined ? (
               <div className="hud py-8 text-center">loading…</div>
-            ) : trades.length === 0 ? (
+            ) : !state || state.trades.length === 0 ? (
               <div className="py-6 px-1">
-                <div className="text-[13px] text-mid leading-relaxed">No trades yet — the strategy is in <span style={{ color: DIM }}>cash</span>.</div>
-                <div className="num text-[11px] text-dim leading-relaxed mt-3">
-                  It buys only when on-chain valuation is in capitulation <span className="text-faint">(NUPL low)</span> and price reclaims its 200-day average, and it distributes into euphoria. Right now neither buy condition is met, so it holds cash and waits.
-                </div>
-                <div className="num text-[11px] text-dim leading-relaxed mt-3">Every entry, trim and exit will appear here the moment it acts — with the time, price and size.</div>
+                <div className="text-[13px] text-mid leading-relaxed">No trades yet — the strategy is in <span style={{ color: DIM }}>cash</span>, waiting for a signal.</div>
+                <div className="num text-[11px] text-dim leading-relaxed mt-3">Every entry, trim and exit lands here the instant it fires — with the time, price, size and the reason. The metrics above stay at 0 until then.</div>
               </div>
             ) : (
-              trades.map((t) => <TradeRow key={t._id} tr={t} />)
+              state.trades.map((t) => <TradeRow key={t._id} tr={t} />)
             )}
           </div>
         </Panel>
       </div>
 
-      {mc && <McPanel mc={mc} />}
+      {/* live 1-minute tape */}
+      <Panel title={<span>{(state?.meta.symbol ?? "BTC/USDT").replace("/USDT", "")} / USDT · 1-minute · live now <span className="text-faint">— the right-most bar moves in real time</span></span>}>
+        <LiveCandles candles={stream.candles} last={stream.last} markers={tapeMarkers} height={220} />
+      </Panel>
 
       <div className="num text-[10px] text-dim text-center pt-1">
-        Live forward paper-trade of the smart-exit blend — simulated, no real money. The chart price is the live OKX feed; trades, position and equity come from the engine’s hourly paper step and update automatically.
+        Live forward paper-trade — simulated, no real money. Price tape is the live OKX feed; trades, position, equity and the metric strip come from the engine&apos;s hourly paper step and the daily indicator track, and update automatically. Indicators reflect the latest closed daily bar.
       </div>
     </div>
   );
