@@ -38,12 +38,12 @@ const fmt = (t: number) => new Date(t).toISOString().slice(0, 10);
 
 // The validated blend doc (Daniel's config).
 const DOC: BlendSleeveDoc = {
-  name: "blend_btc_70_30_onchain_trend_seed",
+  name: "blend_btc_70_30_defensive_seed",
   kind: "blend",
   hypothesis:
-    "70/30 blend of the on-chain cycle overlay and a BTC trend filter — accumulate on capitulation (DCA in when NUPL <= 0), distribute into euphoria (DCA out when NUPL >= 0.60), the mirror image of the buy. TWO efficiency upgrades: (1) CAP ACCUMULATION at half size while price is below the 200d MA, committing the rest only when price reclaims it — so the strategy never fully loads into a confirmed downtrend (the 2022 FTX leg); (2) earn a T-bill/USDC YIELD on the ~60% idle cash. Together they cut maxDD from -28.7% to ~-20% AND lift return slightly (the freed cash earns yield), so risk-adjusted return jumps: Calmar ~1.6 -> ~2.2, Sharpe ~1.42 -> ~1.5. Robust out-of-sample (2018 cycle) and in Monte Carlo (1-in-20 drawdown -46% -> -41%). No leverage, no hedge, no liquidation risk. Long-flat legs, daily rebalance, point-in-time, realistic costs. NUPL uses the free Coin Metrics proxy. Forward-paper (backtest, not real money).",
+    "80/20 blend of the on-chain cycle overlay and a BTC trend filter — accumulate on capitulation (DCA in when NUPL <= 0), distribute into euphoria (DCA out when NUPL >= 0.60), the mirror image of the buy. TWO efficiency upgrades: (1) CAP ACCUMULATION at half size while price is below the 200d MA, committing the rest only when price reclaims it — so the strategy never fully loads into a confirmed downtrend (the 2022 FTX leg); (2) earn a T-bill/USDC YIELD on the ~60% idle cash. Together they cut maxDD from -28.7% to ~-20% AND lift return slightly (the freed cash earns yield), so risk-adjusted return jumps: Calmar ~1.6 -> ~2.2, Sharpe ~1.42 -> ~1.5. Robust out-of-sample (2018 cycle) and in Monte Carlo (1-in-20 drawdown -46% -> -41%). No leverage, no hedge, no liquidation risk. Long-flat legs, daily rebalance, point-in-time, realistic costs. NUPL uses the free Coin Metrics proxy. Forward-paper (backtest, not real money).",
   symbol: "BTC/USDT", tf: "1d",
-  wOnchain: 0.70, smaWin: 125,
+  wOnchain: 0.80, smaWin: 125,
   // SMART EXIT: distribute into euphoria (NUPL >= 0.60) at 0.06/day, the symmetric
   // counterpart of DCA-ing in on capitulation.
   nuplBuy: 0.0, nuplSell: 0.60, maWin: 200, dcaCapDays: 90, sellStep: 0.06,
@@ -51,7 +51,7 @@ const DOC: BlendSleeveDoc = {
   // load into a falling knife) + earn ~3.5% on idle cash. maxDD -29% -> -20%, Calmar -> ~2.2.
   belowMaCap: 0.5, cashYieldApy: 0.035,
   params: {
-    wOnchain: { min: 0.5, max: 0.9, default: 0.70 },
+    wOnchain: { min: 0.5, max: 0.9, default: 0.80 },
     smaWin: { min: 50, max: 250, default: 125, int: true },
   },
   risk: { volTargetAnnual: 1, maxLeverage: 1 },
@@ -141,11 +141,11 @@ async function main() {
 
   // ---- card payload (matches the existing my_strategies schema) ----
   const card = {
-    key: "blend7030",
-    name: "On-chain + trend blend (70/30) - Balanced",
-    tag: "your strategy",
+    key: "blend_defensive",
+    name: "On-chain + trend blend - Defensive (80/20)",
+    tag: "best risk-adjusted",
     desc:
-      "70/30 blend of the on-chain cycle overlay and a BTC trend filter. The overlay (70%) ACCUMULATES when valuation is in capitulation (NUPL low) and DISTRIBUTES into euphoria (NUPL high) — the mirror image of the buy. The trend leg (30%) is long BTC above its 125-day average, else cash. Two upgrades make it efficient: it only accumulates HALF size while price is below the 200-day average (never fully loading into a confirmed downtrend like the 2022 crash, committing the rest only on a reclaim), and it earns a T-bill/USDC yield on the ~60% idle cash. Together they cut the max drawdown from -29% to about -20% AND nudge return up (the idle cash works), so risk-adjusted return jumps — Calmar ~1.6 -> ~2.2, Sharpe ~1.42 -> ~1.5. Robust out-of-sample (2018 cycle) and in Monte Carlo (1-in-20 drawdown -46% -> -41%). No leverage, no hedge, no liquidation risk. Uses the free NUPL proxy. Backtest; live forward drawdowns can run deeper than backtest.",
+      "80/20 blend of the on-chain cycle overlay and a BTC trend filter. The overlay (80%) ACCUMULATES when valuation is in capitulation (NUPL low) and DISTRIBUTES into euphoria (NUPL high) — the mirror image of the buy. The trend leg (20%) is long BTC above its 125-day average, else cash. Two upgrades make it efficient: it only accumulates HALF size while price is below the 200-day average (never fully loading into a confirmed downtrend like the 2022 crash, committing the rest only on a reclaim), and it earns a T-bill/USDC yield on the ~60% idle cash. Together they cut the max drawdown from -29% to about -20% AND nudge return up (the idle cash works), so risk-adjusted return jumps — Calmar ~1.6 -> ~2.2, Sharpe ~1.42 -> ~1.5. Robust out-of-sample (2018 cycle) and in Monte Carlo (1-in-20 drawdown -46% -> -41%). No leverage, no hedge, no liquidation risk. Uses the free NUPL proxy. Backtest; live forward drawdowns can run deeper than backtest.",
     start: "2020-01",
     leverage: 1,
     total: m.total, cagr: m.cagr, maxDD: m.maxDD, sharpe: m.sharpe, calmar: m.calmar,
@@ -209,7 +209,7 @@ async function main() {
   });
   await cx.mutation(api.pipeline.addLesson, {
     source: "blend", candidateId: id,
-    text: `BLEND FORWARD-PAPER: "${DOC.name}" — 70/30 on-chain-overlay + BTC-trend(sma125). Since-2020 backtest ${m.finalMult.toFixed(2)}x / ${(m.maxDD * 100).toFixed(0)}% maxDD / Sharpe ${m.sharpe.toFixed(2)} / Calmar ${m.calmar.toFixed(2)} (vs overlay-alone ${mA.finalMult.toFixed(2)}x / ${(mA.maxDD * 100).toFixed(0)}%). Daniel's best high-return/lower-drawdown config. Routed to PAPER forward-testing (starts mostly in cash — BTC below 200d MA). NUPL = free MVRV proxy; -48% is the honest floor for a ~16x crypto strategy. Real-money bar unchanged.`,
+    text: `BLEND FORWARD-PAPER: "${DOC.name}" — 80/20 on-chain-overlay + BTC-trend(sma125). Since-2020 backtest ${m.finalMult.toFixed(2)}x / ${(m.maxDD * 100).toFixed(0)}% maxDD / Sharpe ${m.sharpe.toFixed(2)} / Calmar ${m.calmar.toFixed(2)} (vs overlay-alone ${mA.finalMult.toFixed(2)}x / ${(mA.maxDD * 100).toFixed(0)}%). Daniel's best high-return/lower-drawdown config. Routed to PAPER forward-testing (starts mostly in cash — BTC below 200d MA). NUPL = free MVRV proxy; -48% is the honest floor for a ~16x crypto strategy. Real-money bar unchanged.`,
   });
   console.log(`  -> seeded blend sleeve "${DOC.name}" into paper incubation (id ${id})`);
 
@@ -218,10 +218,10 @@ async function main() {
   let cfg: { generatedAt: number; strategies: { key: string }[] } = { generatedAt: Date.now(), strategies: [] };
   if (existingJson) { try { cfg = JSON.parse(existingJson); } catch { /* start fresh */ } }
   // remove any prior blend card, then put the blend FIRST (page applies blue-glow to i===0)
-  const others = (cfg.strategies ?? []).filter((s) => s.key !== "blend7030");
-  const next = { generatedAt: Date.now(), strategies: [card, ...others] };
+  const others = (cfg.strategies ?? []).filter((s) => s.key !== "blend_defensive");
+  const _arr = [...others]; _arr.splice(Math.min(1, _arr.length), 0, card); const next = { generatedAt: Date.now(), strategies: _arr };
   await cx.mutation(api.pipeline.setConfig, { key: "my_strategies", json: JSON.stringify(next) });
-  console.log(`  -> wrote My Strategies card "blend7030" as the hero (first of ${next.strategies.length} cards)`);
+  console.log(`  -> wrote My Strategies card "blend_defensive" (2nd of ${next.strategies.length} cards)`);
 
   console.log(`\nDone. The kind-aware paper-step (hourly) now forward-tests the blend; the My Strategies tab shows the since-2020 backtest card.`);
 }
