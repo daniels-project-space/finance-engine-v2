@@ -5,6 +5,7 @@ import { logger, schedules } from "@trigger.dev/sdk";
 import { api, convex } from "../lib/convexClient";
 import { mergeConfig } from "../lib/appConfig";
 import { sendTelegram } from "../lib/telegram";
+import { buildBook, marginalContribution, bookQualifies, type Stream } from "../engine/book";
 import type { Id } from "../../convex/_generated/dataModel";
 
 function liveSharpe(snaps: { ret: number }[], periodsPerYear = 8760): number {
@@ -115,6 +116,103 @@ export const dailyMonitor = schedules.task({
             events.push(`⚠️ Champion "${champion.name}" demoted (live ${live.toFixed(2)} < ${band.toFixed(2)}), rolled back`);
           }
         }
+      }
+
+      // ---- 4. rebuild the diversification BOOK from live paper streams ----
+      // The old book only saw same-cycle in-memory survivors (and its caller was
+      // dropped in the cloud refactor — it sat frozen for 11 days). The honest
+      // input is what the sleeves ACTUALLY did in forward paper: daily returns
+      // derived from equitySnapshots, ERC-weighted across every incubating sleeve.
+      try {
+        const streams: Stream[] = [];
+        const nameOf: Record<string, string> = {};
+        for (const cand of incubating) {
+          const snaps = (await cx.query(api.paper.snapshots, { candidateId: cand._id as Id<"candidates">, limit: 3000 })) as { ts: number; equity: number }[];
+          if (snaps.length < 3) continue;
+          const byDay = new Map<number, number>();          // UTC day -> last equity that day
+          for (const s of [...snaps].sort((a, b) => a.ts - b.ts)) byDay.set(Math.floor(s.ts / 86400_000) * 86400_000, s.equity);
+          const days = [...byDay.keys()].sort((a, b) => a - b);
+          if (days.length < 6) continue;
+          const t: number[] = [], ret: number[] = [];
+          for (let i = 1; i < days.length; i++) {
+            const e0 = byDay.get(days[i - 1])!, e1 = byDay.get(days[i])!;
+            if (e0 > 0) { t.push(days[i]); ret.push(e1 / e0 - 1); }
+          }
+          streams.push({ id: cand._id as string, t, ret });
+          nameOf[cand._id as string] = cand.name;
+        }
+        if (streams.length >= 3) {
+          const book = buildBook(streams, 365);
+          const safe = (x: number) => (Number.isFinite(x) ? x : 0);
+          await cx.mutation(api.book.upsert, {
+            members: book.members.map((m) => ({
+              candidateId: m.id, name: nameOf[m.id] ?? "?",
+              weight: safe(m.weight), riskContrib: safe(m.riskContrib), standaloneSharpe: safe(m.standaloneSharpe),
+            })),
+            weights: book.weights.map(safe),
+            stats: { sharpe: safe(book.stats.sharpe), vol: safe(book.stats.vol), maxDD: safe(book.stats.maxDD), meanRet: safe(book.stats.meanRet), nBars: book.stats.nBars },
+            meanAbsCorr: safe(book.meanAbsCorr),
+          });
+          events.push(`📚 book rebuilt from live paper: ${book.members.length} sleeves over ${book.nBars}d, Sharpe ${safe(book.stats.sharpe).toFixed(2)}, mean|corr| ${safe(book.meanAbsCorr).toFixed(2)}`);
+          // marginal-diversification metrics only once there is enough overlap to
+          // mean anything — these feed the book-eligibility promotion path.
+          if (book.nBars >= 20) {
+            for (let i = 0; i < streams.length; i++) {
+              const mc = marginalContribution(streams[i], streams.filter((_, j) => j !== i), 365);
+              const qualifies = bookQualifies(mc, { minMarginalSharpe: cfg.book.minMarginalSharpe, maxCorr: cfg.book.maxCorr });
+              try {
+                // re-fetch: step 1 may have moved this sleeve's stage since we listed it
+                const fresh = await cx.query(api.candidates.get, { id: streams[i].id as Id<"candidates"> });
+                if (!fresh) continue;
+                const m = fresh.metrics ? JSON.parse(fresh.metrics) as Record<string, unknown> : {};
+                m.marginalBookSharpe = mc.marginalSharpe;
+                m.maxBookCorr = mc.maxCorr;
+                m.bookQualifies = qualifies;
+                await cx.mutation(api.candidates.updateStage, { id: streams[i].id as Id<"candidates">, stage: fresh.stage, metrics: JSON.stringify(m) });
+              } catch { /* per-sleeve best-effort */ }
+            }
+          }
+        } else {
+          events.push(`📚 book: only ${streams.length} sleeve(s) with ≥6d of paper history — waiting`);
+        }
+      } catch (e) {
+        events.push(`🔴 book rebuild FAILED: ${e instanceof Error ? e.message.slice(0, 150) : e}`);
+      }
+
+      // ---- 5. staleness sentinels (a dead cron gets noticed today, not by accident) ----
+      try {
+        const ds = (await cx.query(api.pipeline.listDatasets, {})) as { lastTs: number }[];
+        if (ds.length) {
+          const newest = Math.max(...ds.map((d) => d.lastTs));
+          const ageH = (now - newest) / 3600_000;
+          if (ageH > 4) events.push(`⚠️ ingest STALE: newest bar ${ageH.toFixed(1)}h old`);
+        }
+        const runs = (await cx.query(api.pipeline.recentRuns, { limit: 40 })) as { kind: string; status: string; startedAt: number }[];
+        const lastOk = (kind: string) => runs.find((r) => r.kind === kind && r.status === "ok")?.startedAt ?? 0;
+        if (now - lastOk("evolve") > 8 * 3600_000) events.push(`⚠️ evolve cron STALE: no ok run in ${((now - lastOk("evolve")) / 3600_000).toFixed(0)}h`);
+        if (now - lastOk("ideate-opus") > 12 * 3600_000) events.push(`⚠️ ideate cron STALE: no ok run in ${((now - lastOk("ideate-opus")) / 3600_000).toFixed(0)}h`);
+      } catch (e) {
+        events.push(`staleness check failed: ${e instanceof Error ? e.message.slice(0, 100) : e}`);
+      }
+
+      // ---- 6. zombie reaper: queued/gauntlet rows that never resolved ----
+      try {
+        let reaped = 0;
+        for (const stage of ["queued", "gauntlet"]) {
+          const rows = (await cx.query(api.candidates.listByStage, { stage })) as { _id: Id<"candidates">; createdAt: number }[];
+          for (const r of rows) {
+            if (now - r.createdAt > 3 * 86400_000) {
+              await cx.mutation(api.candidates.updateStage, {
+                id: r._id, stage: "failed", failedStage: "S0-stale",
+                failedReason: `reaped: stuck in ${stage} >3d (worker died or task lost)`,
+              });
+              reaped++;
+            }
+          }
+        }
+        if (reaped) events.push(`🧹 reaped ${reaped} stale queued/gauntlet zombie(s)`);
+      } catch (e) {
+        events.push(`reaper failed: ${e instanceof Error ? e.message.slice(0, 100) : e}`);
       }
 
       await cx.mutation(api.pipeline.finishRun, { id: runId, status: "ok", summary: JSON.stringify(events) });

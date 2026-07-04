@@ -183,12 +183,14 @@ async function main() {
   };
   // Find any existing blend sleeve by NAME and update IT in place (a config tweak
   // changes the content hash, so create() would otherwise insert a 2nd row — we want
-  // ONE sleeve). Fall back to create() on first seed.
-  const recent = await cx.query(api.candidates.recent, { limit: 200 }) as { _id: string; name: string }[];
-  const existing = recent.find((r) => r.name === DOC.name);
+  // ONE sleeve). GOTCHA (2026-07-04): this used candidates.recent(200), which the
+  // Jun-27 sleeve had already scrolled out of by Jun-30 — that created the duplicate
+  // BTC sleeve. findAliveByName scans the alive stages directly, so it can't miss.
+  const matches = await cx.query(api.candidates.findAliveByName, { name: DOC.name }) as { id: string }[];
+  const existing = matches[0];
   let id: Id<"candidates">;
   if (existing) {
-    id = existing._id as Id<"candidates">;
+    id = existing.id as Id<"candidates">;
     console.log(`  (updating existing blend sleeve ${id} in place)`);
   } else {
     const created = await cx.mutation(api.candidates.create, {

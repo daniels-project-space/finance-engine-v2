@@ -294,12 +294,27 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
   // exploration never collapses even when one operator dominates the ledger.
   const wildQuota = ledger.length ? Math.max(1, Math.round(0.1 * gpN)) : 0;
   let wildUsed = 0;
+  // NOVELTY RETRY: ~75-80% of raw GP/crossover output was re-rolling already-seen
+  // hashes and dying at the dedupe gate below — wasted slots. Re-roll a colliding
+  // child with a shifted seed (bounded) so the batch ships mostly-new genomes.
+  const batchHashes = new Set<string>();
+  const isNovel = async (doc: StrategyDoc): Promise<boolean> => {
+    try {
+      const h = canonicalHash(doc);
+      if (batchHashes.has(h)) return false;
+      if (await cx.query(api.candidates.hashExists, { hash: h })) return false;
+      batchHashes.add(h);
+      return true;
+    } catch { return true; } // let the validator/dedupe gate decide later
+  };
   for (let i = 0; i < gpN && parents.length > 0; i++) {
     const seed = seedBase + i;
     if (parents.length >= 2 && i % 4 === 3) {
       const a = pickParent(), b = pickParent();
+      let xdoc = crossoverStrategies(a.doc, b.doc, seed);
+      for (let att = 1; att <= 3 && !(await isNovel(xdoc)); att++) xdoc = crossoverStrategies(a.doc, b.doc, seed + att * 7_777_777);
       proposals.push({
-        doc: crossoverStrategies(a.doc, b.doc, seed), source: "crossover", parentIds: [a.id, b.id],
+        doc: xdoc, source: "crossover", parentIds: [a.id, b.id],
         mechanism: "crossover", parentComposite: Math.max(a.composite, b.composite),
         expectedComposite: ledgerMean("crossover") || Math.max(a.composite, b.composite) * 0.9, wild: false,
       });
@@ -317,7 +332,9 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
         if (pick.key) forcedOp = pick.key.replace("gp-op:", "") as MutationOp;
         wild = pick.wild;
       }
-      const { doc, mutation } = mutateStrategy(p.doc, seed, p.hint, { forcedOp });
+      let child = mutateStrategy(p.doc, seed, p.hint, { forcedOp });
+      for (let att = 1; att <= 3 && !(await isNovel(child.doc)); att++) child = mutateStrategy(p.doc, seed + att * 7_777_777, p.hint, { forcedOp });
+      const { doc, mutation } = child;
       const mechanism = recipeOf(mutation.startsWith("repair_") ? "repair" : "mutation", mutation);
       const expected = (ledgerMean(mechanism) || p.composite * 0.9);
       proposals.push({
