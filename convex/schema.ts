@@ -269,6 +269,75 @@ export default defineSchema({
     updatedAt: v.number(),
   }).index("by_key", ["key"]),
 
+  // ---- LIVE EXECUTION (ADDITIVE) ----
+  // A live deployment binds ONE validated strategy (candidate) to real capital on
+  // a real exchange. Lifecycle: dryrun (full pipeline, orders logged not sent) ->
+  // live (orders sent) -> halted (kill-switch / manual). The executor runs from
+  // the EU VPS (Binance geo-blocks US cloud); Convex is the source of truth for
+  // deployment state, the exchange is the source of truth for fills.
+  liveDeployments: defineTable({
+    candidateId: v.id("candidates"),
+    name: v.string(),
+    symbol: v.string(),               // "ETH/USDT" — primary traded symbol
+    mode: v.string(),                 // "dryrun" | "live" | "halted" | "off"
+    capitalUsd: v.number(),           // notional allocated at creation
+    maxWeight: v.number(),            // hard clamp on target weight [0..1]
+    rebalanceBand: v.number(),        // min |Δweight| that triggers an order
+    maxDailyLossPct: v.number(),      // kill switch: halt + flatten past this daily loss
+    maxDrawdownPct: v.number(),       // kill switch: halt + flatten past this peak DD
+    // executor-maintained state (deployment-scoped sub-account bookkeeping;
+    // reconciled against real exchange balances every run)
+    cashUsd: v.number(),
+    baseQty: v.number(),
+    curWeight: v.number(),
+    equityUsd: v.number(),
+    peakEquityUsd: v.number(),
+    dayKey: v.optional(v.string()),   // UTC date the dayStart equity belongs to
+    dayStartEquityUsd: v.optional(v.number()),
+    lastRunTs: v.optional(v.number()),
+    lastTargetTs: v.optional(v.number()), // strategy bar ts last acted on (one trade per bar)
+    haltReason: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_mode", ["mode"])
+    .index("by_candidate", ["candidateId"]),
+
+  liveOrders: defineTable({
+    deploymentId: v.id("liveDeployments"),
+    ts: v.number(),
+    mode: v.string(),                 // "dryrun" | "live"
+    symbol: v.string(),
+    side: v.string(),                 // "BUY" | "SELL"
+    qty: v.number(),                  // base-asset quantity
+    notionalUsd: v.number(),
+    price: v.number(),                // reference price at decision
+    fillPrice: v.optional(v.number()),
+    status: v.string(),               // "simulated" | "filled" | "rejected" | "error" | "skipped"
+    exchangeOrderId: v.optional(v.string()),
+    targetWeight: v.number(),
+    fromWeight: v.number(),
+    note: v.optional(v.string()),
+  }).index("by_deployment", ["deploymentId", "ts"]),
+
+  liveSnapshots: defineTable({
+    deploymentId: v.id("liveDeployments"),
+    ts: v.number(),
+    equityUsd: v.number(),
+    weight: v.number(),
+    price: v.number(),
+  }).index("by_deployment", ["deploymentId", "ts"]),
+
+  // Materialized dashboard aggregates. The candidates table outgrew Convex's
+  // 16MB single-execution read limit, so full-scan queries (stage flow, family
+  // rollups) are precomputed here by a paginated internal action on a Convex
+  // cron, and the dashboard reads one small row.
+  summaries: defineTable({
+    key: v.string(),
+    json: v.string(),
+    updatedAt: v.number(),
+  }).index("by_key", ["key"]),
+
   // ---- WAVE-3b (ADDITIVE) ----
   // Per-risk-premium-family outcome rollup — mirrors mechanismStats but keyed by
   // the inferred premium family (trend_momentum / carry_funding / ...), so the

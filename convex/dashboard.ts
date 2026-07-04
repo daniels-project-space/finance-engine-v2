@@ -3,7 +3,7 @@
 // for the precision-instrument dashboard. Safe to delete.
 
 import { v } from "convex/values";
-import { query } from "./_generated/server";
+import { query, type QueryCtx } from "./_generated/server";
 
 // ------------------------------------------------------------------ helpers
 function parseMetrics(s?: string): Record<string, number> {
@@ -11,27 +11,24 @@ function parseMetrics(s?: string): Record<string, number> {
   try { return JSON.parse(s) as Record<string, number>; } catch { return {}; }
 }
 
+// The candidates table outgrew Convex's 16MB single-execution read limit, so
+// progression / stageFlow / sleeveFamilies no longer scan it here. They read the
+// materialized `summaries` rows rebuilt every 15 min by convex/summaries.ts.
+async function readSummary<T>(ctx: QueryCtx, key: string): Promise<T | null> {
+  const row = await ctx.db.query("summaries").withIndex("by_key", (q) => q.eq("key", key)).first();
+  if (!row) return null;
+  try { return JSON.parse(row.json) as T; } catch { return null; }
+}
+
 /**
  * Iteration progression: every SCORED candidate as {t, composite, source},
- * time-ordered, for the "are we improving over iterations" chart (record line +
- * per-candidate dots colored by source). Reads only candidates that have a
- * composite via the by_composite index — far smaller than the full table, so no
- * 16MB read warning. Trims `dsl`/`metrics`/`curves` off the payload.
+ * time-ordered, for the "are we improving over iterations" chart. Materialized.
  */
+interface ProgressionShape { points: { t: number; c: number; source: string; name: string }[]; best: number; n: number }
 export const progression = query({
   args: {},
-  handler: async (ctx) => {
-    const scored = await ctx.db.query("candidates").withIndex("by_composite").collect();
-    const pts = scored
-      .filter((r) => r.composite !== undefined && Number.isFinite(r.composite))
-      .map((r) => ({ t: r.createdAt, c: r.composite as number, source: r.source, name: r.name }))
-      .sort((a, b) => a.t - b.t);
-    // cap to the most recent 800 to keep the payload light
-    const trimmed = pts.slice(-800);
-    let best = -Infinity;
-    for (const p of trimmed) if (p.c > best) best = p.c;
-    return { points: trimmed, best: best > -Infinity ? best : 0, n: trimmed.length };
-  },
+  handler: async (ctx): Promise<ProgressionShape> =>
+    (await readSummary<ProgressionShape>(ctx, "progression")) ?? { points: [], best: 0, n: 0 },
 });
 const oosOf = (m: Record<string, number>) => m.portOosSharpe ?? m.wfPooledSharpe ?? m.oosSharpe;
 
@@ -61,44 +58,18 @@ const FLOW: { key: string; label: string; kills: string[] }[] = [
  * from the total (every candidate enters at "generated"). Honest: survivors at the
  * tail are the live counts from the stage table.
  */
+interface StageFlowShape {
+  total: number; penalty: number; survivors: number; killCount: Record<string, number>;
+  inGauntlet: number; rows: { key: string; label: string; reached: number; killed: number }[]; reachedS5: number;
+}
 export const stageFlow = query({
   args: {},
-  handler: async (ctx) => {
-    const all = await ctx.db.query("candidates").collect();
-    const killCount: Record<string, number> = {};
-    let penalty = 0;
-    const liveStage: Record<string, number> = {};
-    for (const r of all) {
-      if (r.failedStage) killCount[r.failedStage] = (killCount[r.failedStage] ?? 0) + 1;
-      if ((r.failedStage ?? "").startsWith("S1") || (r.failedStage ?? "").startsWith("S0")) penalty++;
-      liveStage[r.stage] = (liveStage[r.stage] ?? 0) + 1;
-    }
-    const total = all.length;
-    // reached[generated] = total; each subsequent reached = prev reached - prev killed
-    const rows: { key: string; label: string; reached: number; killed: number }[] = [];
-    let reached = total - penalty; // S1 penalty-box never entered the gauntlet proper
-    for (let i = 0; i < FLOW.length; i++) {
-      const f = FLOW[i];
-      const killed = f.kills.reduce((s, k) => s + (killCount[k] ?? 0), 0);
-      if (f.key === "generated") { rows.push({ key: f.key, label: f.label, reached: total, killed: penalty }); continue; }
-      if (f.key === "incubating") { rows.push({ key: f.key, label: f.label, reached: (liveStage.incubating ?? 0), killed: 0 }); continue; }
-      if (f.key === "book") { rows.push({ key: f.key, label: f.label, reached: (liveStage.incubating ?? 0), killed: 0 }); continue; }
-      if (f.key === "eligible") { rows.push({ key: f.key, label: f.label, reached: (liveStage.eligible ?? 0), killed: 0 }); continue; }
-      if (f.key === "champion") { rows.push({ key: f.key, label: f.label, reached: (liveStage.champion ?? 0), killed: 0 }); continue; }
-      rows.push({ key: f.key, label: f.label, reached, killed });
-      reached -= killed;
-    }
-    const survivors = (liveStage.incubating ?? 0) + (liveStage.eligible ?? 0) + (liveStage.champion ?? 0) + (liveStage.sealed_passed ?? 0);
-    return {
-      total,
-      penalty,
-      survivors,
-      killCount,
-      inGauntlet: (liveStage.gauntlet ?? 0) + (liveStage.queued ?? 0),
-      rows,
-      reachedS5: rows.find((r) => r.key === "S5")?.reached ?? 0,
-    };
-  },
+  handler: async (ctx): Promise<StageFlowShape> =>
+    (await readSummary<StageFlowShape>(ctx, "stageFlow")) ?? {
+      total: 0, penalty: 0, survivors: 0, killCount: {}, inGauntlet: 0,
+      rows: FLOW.map((f) => ({ key: f.key, label: f.label, reached: 0, killed: 0 })),
+      reachedS5: 0,
+    },
 });
 
 /**
@@ -108,64 +79,15 @@ export const stageFlow = query({
  * For each: total bred, scored, best OOS Sharpe, deepest stage reached, a compact
  * equity sparkline from the best member, and survivor count.
  */
+interface FamilyShape {
+  family: string; desc: string; bred: number; scored: number; bestOos: number | null;
+  bestName: string; bestCurve?: { t: number[]; eq: number[] }; deepest: string;
+  survivors: number; meanOos: number | null;
+}
 export const sleeveFamilies = query({
   args: {},
-  handler: async (ctx) => {
-    const all = await ctx.db.query("candidates").collect();
-    const FAM: Record<string, string> = {
-      gp: "DSL", llm: "DSL", mutation: "DSL", crossover: "DSL", seed: "DSL", repair: "DSL", imported: "DSL",
-      xsection: "Cross-sectional", ivsleeve: "IV-timing (DVOL)", onchain: "On-chain (MVRV/NVT)",
-    };
-    const DESC: Record<string, string> = {
-      "DSL": "Per-symbol momentum / mean-reversion / breakout — evolved DSL graphs",
-      "Cross-sectional": "Rank trend / carry / basis / OI / LSR / liquidity / size across the universe",
-      "IV-timing (DVOL)": "Deribit implied-vol regime timing (orthogonal to price)",
-      "On-chain (MVRV/NVT)": "Valuation-timing on MVRV / NVT z-scores (strongest standalone edge)",
-    };
-    type Agg = {
-      family: string; desc: string; bred: number; scored: number; bestOos: number;
-      bestName: string; bestCurve?: { t: number[]; eq: number[] }; deepest: string; survivors: number; meanOos: number; oosSum: number; oosN: number;
-    };
-    const STAGE_DEPTH: Record<string, number> = {
-      "S2-train": 2, "S3-walkforward": 3, "S3x-walkforward": 3, "S3iv-walkforward": 3, "S3oc-walkforward": 3,
-      "S4-cross-symbol": 4, "S4-portfolio": 4.5, "S4x-portfolio": 4.5,
-      "S5-stats": 5, "S5x-stats": 5, "S5iv-stats": 5, "S5oc-stats": 5, "S5b-stress": 5.5, "S5c-pbo": 5.7, "S6-sealed": 6,
-    };
-    const order = ["DSL", "Cross-sectional", "IV-timing (DVOL)", "On-chain (MVRV/NVT)"];
-    const aggs: Record<string, Agg> = {};
-    for (const fam of order) aggs[fam] = { family: fam, desc: DESC[fam], bred: 0, scored: 0, bestOos: -99, bestName: "", deepest: "", survivors: 0, meanOos: 0, oosSum: 0, oosN: 0 };
-    for (const r of all) {
-      const fam = FAM[r.source];
-      if (!fam) continue;
-      const a = aggs[fam];
-      a.bred++;
-      if (ALIVE.has(r.stage)) a.survivors++;
-      const m = parseMetrics(r.metrics);
-      const oos = oosOf(m);
-      if (oos !== undefined && Number.isFinite(oos)) {
-        a.scored++; a.oosSum += oos; a.oosN++;
-        if (oos > a.bestOos) {
-          a.bestOos = oos; a.bestName = r.name;
-          try {
-            const cv = r.curves ? JSON.parse(r.curves) as { wf?: { t: number[]; eq: number[] }; port?: { t: number[]; eq: number[] } } : {};
-            a.bestCurve = cv.port ?? cv.wf;
-          } catch { /* ignore */ }
-        }
-      }
-      const depth = STAGE_DEPTH[r.failedStage ?? ""] ?? (ALIVE.has(r.stage) ? 8 : 0);
-      const curDepth = STAGE_DEPTH[a.deepest] ?? (a.deepest === "alive" ? 8 : 0);
-      if (depth > curDepth) a.deepest = ALIVE.has(r.stage) && depth === 8 ? "alive" : (r.failedStage ?? a.deepest);
-    }
-    return order.map((fam) => {
-      const a = aggs[fam];
-      return {
-        family: a.family, desc: a.desc, bred: a.bred, scored: a.scored,
-        bestOos: a.bestOos > -99 ? a.bestOos : null, bestName: a.bestName,
-        bestCurve: a.bestCurve, deepest: a.deepest || "—", survivors: a.survivors,
-        meanOos: a.oosN ? a.oosSum / a.oosN : null,
-      };
-    });
-  },
+  handler: async (ctx): Promise<FamilyShape[]> =>
+    (await readSummary<FamilyShape[]>(ctx, "sleeveFamilies")) ?? [],
 });
 
 /**
