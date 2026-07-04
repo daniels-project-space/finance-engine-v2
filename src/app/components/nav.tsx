@@ -10,6 +10,7 @@ import { usePathname } from "next/navigation";
 //  Engine        — is the discovery engine working, and what's it finding?
 const PRIMARY: { href: string; label: string; glow?: boolean }[] = [
   { href: "/", label: "Live", glow: true },
+  { href: "/live", label: "Real Money", glow: true },
   { href: "/watch", label: "Watch", glow: true },
   { href: "/my-strategies", label: "My Strategies" },
   { href: "/strategies", label: "Strategies" },
