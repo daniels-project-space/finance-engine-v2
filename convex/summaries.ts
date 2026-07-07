@@ -225,21 +225,30 @@ export const rebuild = internalAction({
     // dataSources reads this instead of scanning candidates.take(2000).
     await ctx.runMutation(internal.summaries.write, { key: "sourcesSeen", json: JSON.stringify([...srcSeen]) });
 
-    // 2026-07-07 — wrap-and-cache the live dashboard queries (paperBook /
-    // bookStatus). They previously re-ran on EVERY candidates write (N+1 +
-    // take(400) scans of fat metrics/curves JSON); now the dashboard reads these
-    // O(1) summaries rows and only this cron pays the scan. dataSources is handled
-    // above via sourcesSeen. One failing cache must not break the core rebuild.
-    for (const [key, fn] of [
-      ["dash_paperBook", api.dashboard.paperBook],
-      ["dash_bookStatus", api.dashboard.bookStatus],
-    ] as const) {
-      try {
-        const data = await ctx.runQuery(fn, { _bypassCache: true });
-        await ctx.runMutation(internal.summaries.write, { key, json: JSON.stringify(data) });
-      } catch { /* skip a failing dashboard cache; core summaries already written */ }
-    }
+    // bookStatus (the book-gate snapshot) is slow-moving, so it's refreshed with
+    // this daily full-scan pass. paperBook (LIVE paper equity) is refreshed every
+    // 6h by the separate refreshPaperBook cron so it stays fresh WITHOUT paying the
+    // full-candidates scan. dataSources reads sourcesSeen above (no scan).
+    try {
+      const bs = await ctx.runQuery(api.dashboard.bookStatus, { _bypassCache: true });
+      await ctx.runMutation(internal.summaries.write, { key: "dash_bookStatus", json: JSON.stringify(bs) });
+    } catch { /* non-fatal — core summaries already written */ }
     return { total, families: families.length, scored: trimmed.length };
+  },
+});
+
+/**
+ * Refresh ONLY the live paper-book cache (dash_paperBook). paperBook scans just the
+ * active-stage candidates (by_stage: incubating/eligible/champion) + their equity
+ * snapshots — a small bounded set — so it can run frequently (6h) without the full
+ * ~71k-row, 33 KB-per-doc candidates scan that the funnel rebuild does daily.
+ */
+export const refreshPaperBook = internalAction({
+  args: {},
+  handler: async (ctx): Promise<{ ok: true }> => {
+    const data = await ctx.runQuery(api.dashboard.paperBook, { _bypassCache: true });
+    await ctx.runMutation(internal.summaries.write, { key: "dash_paperBook", json: JSON.stringify(data) });
+    return { ok: true };
   },
 });
 
