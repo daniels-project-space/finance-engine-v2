@@ -12,11 +12,10 @@ import { gauntletTask } from "./gauntlet";
 
 export const evolveCycle = schedules.task({
   id: "evolve-cycle",
-  // PARKED (Jan 1 only) — deploy-proof paused so the loop does NOT start firing.
-  // Real cadence is "20 */3 * * *" (every 3h at :20). The orchestrator restores
-  // that cron at go-live, after the CLAUDE_CODE_OAUTH_TOKEN is set and a
-  // verification run passes.
-  cron: "20 */3 * * *", // every 3h (00:20,03:20,...21:20 UTC)
+  // Throttled to once/day (Daniel, 2026-07-07): the evolution loop was iterating
+  // every 3h (8x/day) — too much. Now a single daily batch at 07:20 UTC, just
+  // after the 07:00 daily-monitor. Prior cadence was "20 */3 * * *".
+  cron: "20 7 * * *", // once a day at 07:20 UTC
   machine: "small-2x",
   maxDuration: 1500,
   run: async () => {
