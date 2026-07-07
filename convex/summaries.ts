@@ -10,7 +10,7 @@
 
 import { v } from "convex/values";
 import { internalAction, internalMutation, internalQuery, query } from "./_generated/server";
-import { internal } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 
 const PAGE = 50;                  // docs per paginated read (bounded bytes per execution)
 const PRUNE_AGE_DAYS = 14;
@@ -217,6 +217,22 @@ export const rebuild = internalAction({
     await ctx.runMutation(internal.summaries.write, { key: "stageFlow", json: JSON.stringify(stageFlow) });
     await ctx.runMutation(internal.summaries.write, { key: "sleeveFamilies", json: JSON.stringify(families) });
     await ctx.runMutation(internal.summaries.write, { key: "progression", json: JSON.stringify({ points: trimmed, best: best > -Infinity ? best : 0, n: trimmed.length }) });
+
+    // 2026-07-07 — wrap-and-cache the live dashboard queries (paperBook /
+    // bookStatus / dataSources). They previously re-ran on EVERY candidates write
+    // (N+1 + take(2000)/take(400) scans of fat metrics/curves JSON); now the
+    // dashboard reads these O(1) summaries rows and only this hourly cron pays the
+    // scan. One failing cache must not break the core rebuild above.
+    for (const [key, fn] of [
+      ["dash_paperBook", api.dashboard.paperBook],
+      ["dash_bookStatus", api.dashboard.bookStatus],
+      ["dash_dataSources", api.dashboard.dataSources],
+    ] as const) {
+      try {
+        const data = await ctx.runQuery(fn, { _bypassCache: true });
+        await ctx.runMutation(internal.summaries.write, { key, json: JSON.stringify(data) });
+      } catch { /* skip a failing dashboard cache; core summaries already written */ }
+    }
     return { total, families: families.length, scored: trimmed.length };
   },
 });

@@ -98,8 +98,15 @@ export const sleeveFamilies = query({
  * the raw, deflated, divRatio, meanCorr, members + the explicit progress-to-1.0.
  */
 export const bookStatus = query({
-  args: {},
-  handler: async (ctx) => {
+  args: { _bypassCache: v.optional(v.boolean()) },
+  handler: async (ctx, { _bypassCache }) => {
+    // Cached path — one summaries row written hourly by summaries.rebuild. The
+    // live compute below scans candidates.take(400) and re-ran on every candidate
+    // write; the cache makes the dashboard read O(1). Cold → live fallback.
+    if (!_bypassCache) {
+      const cached = await ctx.db.query("summaries").withIndex("by_key", (q) => q.eq("key", "dash_bookStatus")).first();
+      if (cached) return JSON.parse(cached.json);
+    }
     const book = await ctx.db.query("book").withIndex("by_key", (q) => q.eq("key", "current")).first();
     // scan recent candidates for the latest persisted book-gate snapshot
     const recent = await ctx.db.query("candidates").order("desc").take(400);
@@ -141,8 +148,14 @@ export const bookStatus = query({
  * they live in R2, not the datasets table.
  */
 export const dataSources = query({
-  args: {},
-  handler: async (ctx) => {
+  args: { _bypassCache: v.optional(v.boolean()) },
+  handler: async (ctx, { _bypassCache }) => {
+    // Cached path — hourly summaries row. Live compute scans candidates.take(2000)
+    // just to collect a Set of ~5 sources, re-running on every candidate write.
+    if (!_bypassCache) {
+      const cached = await ctx.db.query("summaries").withIndex("by_key", (q) => q.eq("key", "dash_dataSources")).first();
+      if (cached) return JSON.parse(cached.json);
+    }
     const datasets = await ctx.db.query("datasets").collect();
     const symbols = [...new Set(datasets.map((d) => d.symbol))];
     const tfs = [...new Set(datasets.map((d) => d.tf))];
@@ -177,8 +190,16 @@ export const dataSources = query({
  * exist ("warming" otherwise) — honest about how young the track record is.
  */
 export const paperBook = query({
-  args: {},
-  handler: async (ctx) => {
+  args: { _bypassCache: v.optional(v.boolean()) },
+  handler: async (ctx, { _bypassCache }) => {
+    // Cached path — hourly summaries row. The live compute below does an N+1 over
+    // every incubating/eligible/champion sleeve, each reading up to 2000 equity
+    // snapshots, and re-ran on EVERY candidate write. Paper steps are hourly, so a
+    // 60-min cache loses no freshness. Cold → live fallback.
+    if (!_bypassCache) {
+      const cached = await ctx.db.query("summaries").withIndex("by_key", (q) => q.eq("key", "dash_paperBook")).first();
+      if (cached) return JSON.parse(cached.json);
+    }
     const stages = ["incubating", "eligible", "champion"];
     const sleeves: { id: string; name: string; source: string; family: string; forwardSeed: boolean; userStrategy?: boolean; flagship?: boolean; lastTs?: number; leverage?: number; legs?: { symbol: string; long: boolean }[]; startEq: number; equity: number; peak: number; days: number; ret: number; sharpe: number | null; maxDD: number; halted: boolean; bars: number; spark: number[]; backtestTotal?: number; backtestHodlTotal?: number; vsHodl?: { trendCagr: number; trendMaxDD: number; trendCalmar: number; hodlCagr: number; hodlMaxDD: number; hodlCalmar: number } }[] = [];
     const PPY = 8760; // hourly paper steps
