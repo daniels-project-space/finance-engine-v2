@@ -6,13 +6,14 @@ import { internal } from "./_generated/api";
 
 const crons = cronJobs();
 
-// 2026-07-07 — widened 15 min → 60 min. rebuild does a FULL paginated scan of the
-// (unbounded, fat curves/metrics docs) candidates table every run to produce three
-// cosmetic dashboard summaries (stageFlow funnel / sleeveFamilies / progression).
-// At 15 min that was 96 full-table scans/day — the dominant DB-IO cost after the
-// live candidates.funnel/analytics queries were removed (2026-07-04). The funnel is
-// a slow-moving research view, so hourly staleness is invisible. ~75% fewer scans.
-crons.interval("rebuild dashboard summaries", { minutes: 60 }, internal.summaries.rebuild, {});
+// 2026-07-07 — widened 15 min → 60 min → 6h. rebuild does a FULL paginated scan of
+// the candidates table (docs average ~33 KB — fat curves/metrics/dsl JSON), so each
+// run reads tens–hundreds of MB just to produce cosmetic funnel/family/progression
+// summaries + refresh the dashboard caches. That full-table fat scan is the single
+// biggest DB-IO cost on the whole Convex team. The funnel is a slow-moving research
+// view and the paper-book/gate caches tolerate ≤6h staleness, so 6h cadence cuts
+// this ~4× again vs 60 min (~24× vs the original 15 min).
+crons.interval("rebuild dashboard summaries", { hours: 6 }, internal.summaries.rebuild, {});
 crons.daily("prune failed candidate curves", { hourUTC: 3, minuteUTC: 17 }, internal.summaries.prune, {});
 
 export default crons;

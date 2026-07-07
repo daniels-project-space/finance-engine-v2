@@ -142,6 +142,10 @@ export const rebuild = internalAction({
     const aggs: Record<string, Agg> = {};
     for (const fam of FAMILY_ORDER) aggs[fam] = { bred: 0, scored: 0, bestOos: -99, bestName: "", bestId: "", deepest: "", survivors: 0, oosSum: 0, oosN: 0 };
     const progression: { t: number; c: number; source: string; name: string }[] = [];
+    // Materialize the distinct source set here (this pass already reads every
+    // candidate) so dataSources stops doing its own candidates.take(2000) of
+    // 33 KB docs on every reactive call.
+    const srcSeen = new Set<string>();
 
     let cursor: string | null = null;
     for (;;) {
@@ -149,6 +153,7 @@ export const rebuild = internalAction({
         await ctx.runQuery(internal.summaries.page, { cursor });
       for (const r of res.rows) {
         total++;
+        if (r.source) srcSeen.add(r.source);
         if (r.failedStage) killCount[r.failedStage] = (killCount[r.failedStage] ?? 0) + 1;
         if ((r.failedStage ?? "").startsWith("S1") || (r.failedStage ?? "").startsWith("S0")) penalty++;
         liveStage[r.stage] = (liveStage[r.stage] ?? 0) + 1;
@@ -217,16 +222,17 @@ export const rebuild = internalAction({
     await ctx.runMutation(internal.summaries.write, { key: "stageFlow", json: JSON.stringify(stageFlow) });
     await ctx.runMutation(internal.summaries.write, { key: "sleeveFamilies", json: JSON.stringify(families) });
     await ctx.runMutation(internal.summaries.write, { key: "progression", json: JSON.stringify({ points: trimmed, best: best > -Infinity ? best : 0, n: trimmed.length }) });
+    // dataSources reads this instead of scanning candidates.take(2000).
+    await ctx.runMutation(internal.summaries.write, { key: "sourcesSeen", json: JSON.stringify([...srcSeen]) });
 
     // 2026-07-07 — wrap-and-cache the live dashboard queries (paperBook /
-    // bookStatus / dataSources). They previously re-ran on EVERY candidates write
-    // (N+1 + take(2000)/take(400) scans of fat metrics/curves JSON); now the
-    // dashboard reads these O(1) summaries rows and only this hourly cron pays the
-    // scan. One failing cache must not break the core rebuild above.
+    // bookStatus). They previously re-ran on EVERY candidates write (N+1 +
+    // take(400) scans of fat metrics/curves JSON); now the dashboard reads these
+    // O(1) summaries rows and only this cron pays the scan. dataSources is handled
+    // above via sourcesSeen. One failing cache must not break the core rebuild.
     for (const [key, fn] of [
       ["dash_paperBook", api.dashboard.paperBook],
       ["dash_bookStatus", api.dashboard.bookStatus],
-      ["dash_dataSources", api.dashboard.dataSources],
     ] as const) {
       try {
         const data = await ctx.runQuery(fn, { _bypassCache: true });

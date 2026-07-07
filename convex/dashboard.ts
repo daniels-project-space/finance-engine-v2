@@ -148,14 +148,8 @@ export const bookStatus = query({
  * they live in R2, not the datasets table.
  */
 export const dataSources = query({
-  args: { _bypassCache: v.optional(v.boolean()) },
-  handler: async (ctx, { _bypassCache }) => {
-    // Cached path — hourly summaries row. Live compute scans candidates.take(2000)
-    // just to collect a Set of ~5 sources, re-running on every candidate write.
-    if (!_bypassCache) {
-      const cached = await ctx.db.query("summaries").withIndex("by_key", (q) => q.eq("key", "dash_dataSources")).first();
-      if (cached) return JSON.parse(cached.json);
-    }
+  args: {},
+  handler: async (ctx) => {
     const datasets = await ctx.db.query("datasets").collect();
     const symbols = [...new Set(datasets.map((d) => d.symbol))];
     const tfs = [...new Set(datasets.map((d) => d.tf))];
@@ -163,9 +157,10 @@ export const dataSources = query({
     const fundingTs = datasets.length ? Math.max(...datasets.map((d) => d.fundingLastTs ?? 0)) : 0;
     const totalBars = datasets.reduce((s, d) => s + d.bars, 0);
     const totalGaps = datasets.reduce((s, d) => s + d.gaps, 0);
-    // which orthogonal lanes have produced candidates (evidence the feed is wired)
-    const cands = await ctx.db.query("candidates").take(2000);
-    const srcSeen = new Set(cands.map((c) => c.source));
+    // Source set materialized by summaries.rebuild's single full pass — was a
+    // candidates.take(2000) of 33 KB docs (~66 MB) on every reactive call.
+    const seenRow = await ctx.db.query("summaries").withIndex("by_key", (q) => q.eq("key", "sourcesSeen")).first();
+    const srcSeen = new Set<string>(seenRow ? (JSON.parse(seenRow.json) as string[]) : []);
     return {
       price: { symbols: symbols.length, tfs, lastTs, totalBars, totalGaps, rows: datasets.length },
       funding: { lastTs: fundingTs },
