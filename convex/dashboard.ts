@@ -97,15 +97,18 @@ export const sleeveFamilies = query({
  * any book-admitted candidate's metrics, else (empty book) it is 0.0. We return
  * the raw, deflated, divRatio, meanCorr, members + the explicit progress-to-1.0.
  */
+type BookStatusMember = { name: string; weight: number; riskContrib: number; standaloneSharpe: number };
+type BookStatus = { nMembers: number; rawSharpe: number; deflated: number; divRatio: number; meanCorr: number; target: number; progress: number; passes: boolean; members: BookStatusMember[]; stats: { sharpe: number; vol: number; maxDD: number; meanRet: number; nBars: number }; updatedAt: number };
+
 export const bookStatus = query({
   args: { _bypassCache: v.optional(v.boolean()) },
-  handler: async (ctx, { _bypassCache }) => {
+  handler: async (ctx, { _bypassCache }): Promise<BookStatus> => {
     // Cached path — one summaries row written hourly by summaries.rebuild. The
     // live compute below scans candidates.take(400) and re-ran on every candidate
     // write; the cache makes the dashboard read O(1). Cold → live fallback.
     if (!_bypassCache) {
       const cached = await ctx.db.query("summaries").withIndex("by_key", (q) => q.eq("key", "dash_bookStatus")).first();
-      if (cached) return JSON.parse(cached.json);
+      if (cached) return JSON.parse(cached.json) as BookStatus;
     }
     const book = await ctx.db.query("book").withIndex("by_key", (q) => q.eq("key", "current")).first();
     // scan recent candidates for the latest persisted book-gate snapshot
