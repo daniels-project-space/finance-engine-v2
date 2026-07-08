@@ -184,19 +184,22 @@ export const dataSources = query({
  * PAPER = simulated, no real money. Forward Sharpe shown only once enough bars
  * exist ("warming" otherwise) — honest about how young the track record is.
  */
+type Sleeve = { id: string; name: string; source: string; family: string; forwardSeed: boolean; userStrategy?: boolean; flagship?: boolean; lastTs?: number; leverage?: number; legs?: { symbol: string; long: boolean }[]; startEq: number; equity: number; peak: number; days: number; ret: number; sharpe: number | null; maxDD: number; halted: boolean; bars: number; spark: number[]; backtestTotal?: number; backtestHodlTotal?: number; vsHodl?: { trendCagr: number; trendMaxDD: number; trendCalmar: number; hodlCagr: number; hodlMaxDD: number; hodlCalmar: number } };
+type PaperBook = { nSleeves: number; days: number; book: { t: number[]; eq: number[]; sharpe: number | null; ret: number; maxDD: number; bars: number; lastTs: number }; sleeves: Sleeve[] };
+
 export const paperBook = query({
   args: { _bypassCache: v.optional(v.boolean()) },
-  handler: async (ctx, { _bypassCache }) => {
+  handler: async (ctx, { _bypassCache }): Promise<PaperBook> => {
     // Cached path — hourly summaries row. The live compute below does an N+1 over
     // every incubating/eligible/champion sleeve, each reading up to 2000 equity
     // snapshots, and re-ran on EVERY candidate write. Paper steps are hourly, so a
     // 60-min cache loses no freshness. Cold → live fallback.
     if (!_bypassCache) {
       const cached = await ctx.db.query("summaries").withIndex("by_key", (q) => q.eq("key", "dash_paperBook")).first();
-      if (cached) return JSON.parse(cached.json);
+      if (cached) return JSON.parse(cached.json) as PaperBook;
     }
     const stages = ["incubating", "eligible", "champion"];
-    const sleeves: { id: string; name: string; source: string; family: string; forwardSeed: boolean; userStrategy?: boolean; flagship?: boolean; lastTs?: number; leverage?: number; legs?: { symbol: string; long: boolean }[]; startEq: number; equity: number; peak: number; days: number; ret: number; sharpe: number | null; maxDD: number; halted: boolean; bars: number; spark: number[]; backtestTotal?: number; backtestHodlTotal?: number; vsHodl?: { trendCagr: number; trendMaxDD: number; trendCalmar: number; hodlCagr: number; hodlMaxDD: number; hodlCalmar: number } }[] = [];
+    const sleeves: Sleeve[] = [];
     const PPY = 8760; // hourly paper steps
     const fam = (s: string) => s === "xsection" ? "Cross-sectional" : s === "ivsleeve" ? "IV-timing" : s === "onchain" ? "On-chain" : s === "trendbeta" ? "Trend-beta" : s === "blend" ? "Blend (on-chain + trend)" : s === "regime" ? "Regime / chop" : "DSL";
     // collect all snapshots keyed by timestamp for the combined book curve

@@ -105,6 +105,13 @@ export async function ingestSymbol(
     }
   }
 
+  // Snapshot aux (WAVE-3a) series lengths BEFORE their fills, so we can persist the
+  // (large) candle file only when a series actually GAINS rows — not every run.
+  const preFunding = bars.fundingT?.length ?? 0;
+  const preOi = bars.oiT?.length ?? 0;
+  const preLsr = bars.lsrT?.length ?? 0;
+  const preSpotFilled = bars.spotC?.reduce((n, x) => n + (x > 0 ? 1 : 0), 0) ?? 0;
+
   // funding: archive for complete months, OKX for the tail
   bars.fundingT = bars.fundingT ?? []; bars.fundingR = bars.fundingR ?? [];
   const fFrom = bars.fundingT.length ? bars.fundingT[bars.fundingT.length - 1] + 1 : historyStartTs;
@@ -192,9 +199,14 @@ export async function ingestSymbol(
     if (Math.abs(r) > 0.35) log?.(`OUTLIER ${symbol} ${new Date(bars.t[i]).toISOString()}: ${(r * 100).toFixed(1)}% bar`);
   }
 
-  // persist if klines changed OR the WAVE-3a series gained data (basis/oi/lsr) OR first run
-  const cryptoNativeFilled = (bars.spotC?.some((x) => x > 0) ?? false) || (bars.oiT?.length ?? 0) > 0 || (bars.lsrT?.length ?? 0) > 0;
-  if (appended > 0 || !existing || cryptoNativeFilled) await putJsonGz(candleKey(symbol, tf), bars);
+  // persist only if klines changed OR an aux series (funding/spot/oi/lsr) actually
+  // gained rows this run OR first run — avoids re-writing an unchanged ~7 MB file hourly.
+  const auxGained =
+    (bars.fundingT?.length ?? 0) > preFunding ||
+    (bars.oiT?.length ?? 0) > preOi ||
+    (bars.lsrT?.length ?? 0) > preLsr ||
+    (bars.spotC?.reduce((n, x) => n + (x > 0 ? 1 : 0), 0) ?? 0) > preSpotFilled;
+  if (appended > 0 || !existing || auxGained) await putJsonGz(candleKey(symbol, tf), bars);
   return {
     symbol, tf, bars: bars.t.length, appended, gaps,
     firstTs: bars.t[0] ?? 0, lastTs: bars.t[bars.t.length - 1] ?? 0,
