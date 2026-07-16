@@ -1,5 +1,5 @@
-// Opus ideation via the locally-authenticated Claude Code CLI (headless -p
-// mode — an official Claude Code feature included in the Max subscription).
+// Manual ideation through the provider selected in the dashboard. Both paths
+// use the owner's subscription CLI; platform API keys are disabled in llm.ts.
 // Personal-use automation: runs ONLY on this machine where the owner's CLI
 // session is logged in, ~8 low-volume calls/day, no key extraction, no cloud
 // credential copies. Proposals are schema-validated and then fight the same
@@ -7,10 +7,9 @@
 //
 // Usage: npx tsx scripts/ideate-cli.ts [nProposals]
 
-import { execFile } from "node:child_process";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
-import { buildPrompt, parseProposals } from "../src/engine/llm";
+import { CODEX_EVOLUTION_MODEL, buildPrompt, parseProposals, runClaudeCli, runCodexCli, type AgentProvider } from "../src/engine/llm";
 import { modelForLane } from "../src/engine/model";
 import { canonicalHash, familyHash, validateStrategy } from "../src/engine/dsl";
 import { getAppConfig, processCandidate } from "../src/pipeline/process";
@@ -20,37 +19,13 @@ import { todayKey } from "../src/lib/appConfig";
 // dead "claude-fable-5"). Subscription CLI only — ANTHROPIC_API_KEY is stripped
 // from the child env so this can never bill the API.
 const MODEL = modelForLane("strategy");
-const TIMEOUT_MS = Number(process.env.EVOLUTION_LLM_TIMEOUT_MS ?? 12 * 60 * 1000);
-
-function runClaude(prompt: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const env = { ...process.env };
-    delete env.ANTHROPIC_API_KEY; // subscription-only
-    const child = execFile(
-      process.env.CLAUDE_BIN || "claude",
-      ["-p", "--model", MODEL, "--output-format", "json"],
-      { timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, cwd: process.env.CLAUDE_CWD || "/root", env },
-      (err, stdout, stderr) => {
-        if (err) return reject(new Error(`claude cli (${MODEL}): ${err.message.slice(0, 200)} ${String(stderr).slice(0, 200)}`));
-        try {
-          const j = JSON.parse(stdout) as { is_error?: boolean; subtype?: string; result?: string };
-          if (j.is_error || j.subtype !== "success") return reject(new Error(`claude cli (${MODEL}) error: ${String(j.result ?? j.subtype).slice(0, 200)}`));
-          resolve(j.result ?? "");
-        } catch {
-          resolve(stdout); // tolerate a raw-text reply
-        }
-      },
-    );
-    child.stdin?.write(prompt);
-    child.stdin?.end();
-  });
-}
-
 async function main() {
   const n = Number(process.argv[2] ?? "6");
   const url = process.env.CONVEX_URL ?? process.env.NEXT_PUBLIC_CONVEX_URL;
   if (!url) throw new Error("CONVEX_URL missing");
   const cx = new ConvexHttpClient(url);
+  const provider = await cx.query(api.pipeline.getAgentProvider, {}) as AgentProvider;
+  const model = provider === "codex" ? CODEX_EVOLUTION_MODEL : MODEL;
   const runId = await cx.mutation(api.pipeline.startRun, { kind: "ideate-opus" });
   try {
     const cfg = await getAppConfig(cx);
@@ -106,12 +81,12 @@ TARGET: deployed 5-pair portfolio OOS Sharpe >= 1.5 with CAGR >= 30%, surviving 
 
 Output ONLY the JSON object. No prose, no markdown fences.`;
 
-    console.log(`asking ${MODEL} for ${n} proposals (${lessons.length} lessons in context)...`);
+    console.log(`asking ${provider}/${model} for ${n} proposals (${lessons.length} lessons in context)...`);
     const t0 = Date.now();
     const raw = process.env.IDEATE_RAW
       ? (await import("node:fs")).readFileSync(process.env.IDEATE_RAW, "utf-8")
-      : await runClaude(prompt);
-    console.log(`claude replied in ${((Date.now() - t0) / 1000).toFixed(0)}s (${raw.length} chars)`);
+      : (provider === "codex" ? await runCodexCli(prompt, model) : await runClaudeCli(prompt, model)).text;
+    console.log(`${provider} replied in ${((Date.now() - t0) / 1000).toFixed(0)}s (${raw.length} chars)`);
     const { writeFileSync } = await import("node:fs");
     writeFileSync("/tmp/ideate-raw.txt", raw);
     const proposals = parseProposals(raw);
@@ -138,7 +113,7 @@ Output ONLY the JSON object. No prose, no markdown fences.`;
       if (validateStrategy(p.doc).length > 0) continue;
       const hash = canonicalHash(p.doc);
       if (await cx.query(api.candidates.hashExists, { hash })) { console.log(`  dup: ${p.doc.name}`); continue; }
-      p.doc.hypothesis = `${p.doc.hypothesis} [Opus/CLI] ${p.rationale.slice(0, 100)}`;
+      p.doc.hypothesis = `${p.doc.hypothesis} [${provider}/${model}] ${p.rationale.slice(0, 100)}`;
       const { id, duplicate } = await cx.mutation(api.candidates.create, {
         name: p.doc.name.startsWith("opus_") ? p.doc.name : `opus_${p.doc.name}`.slice(0, 40),
         source: "llm", dsl: JSON.stringify(p.doc), hash, familyHash: familyHash(p.doc), hypothesis: p.doc.hypothesis,
@@ -154,7 +129,7 @@ Output ONLY the JSON object. No prose, no markdown fences.`;
       if (res.passed) { passed++; console.log(`  PASS  ${cand?.name} (${secs}s) composite=${res.composite?.toFixed(2)}`); }
       else console.log(`  kill  ${cand?.name} (${secs}s) at ${res.stage}: ${cand?.failedReason ?? ""}`);
     }
-    await cx.mutation(api.pipeline.finishRun, { id: runId, status: "ok", summary: JSON.stringify({ model: MODEL, proposals: proposals.length, queued, passed }) });
+    await cx.mutation(api.pipeline.finishRun, { id: runId, status: "ok", summary: JSON.stringify({ provider, model, proposals: proposals.length, queued, passed }) });
     console.log(`ideation done: ${queued} queued, ${passed} into incubation`);
   } catch (err) {
     await cx.mutation(api.pipeline.finishRun, { id: runId, status: "error", summary: String(err).slice(0, 400) });

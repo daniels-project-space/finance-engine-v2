@@ -131,3 +131,21 @@ export const setConfig = mutation({
     else await ctx.db.insert("config", { key, json });
   },
 });
+
+export const getAgentProvider = query({
+  args: {},
+  handler: async (ctx) => {
+    const value = (await ctx.db.query("config").withIndex("by_key", (q) => q.eq("key", "agent_provider")).first())?.json;
+    return value === "claude" ? "claude" : "codex";
+  },
+});
+
+export const setAgentProvider = mutation({
+  args: { provider: v.union(v.literal("codex"), v.literal("claude")) },
+  handler: async (ctx, { provider }) => {
+    const row = await ctx.db.query("config").withIndex("by_key", (q) => q.eq("key", "agent_provider")).first();
+    if (row) await ctx.db.patch(row._id, { json: provider });
+    else await ctx.db.insert("config", { key: "agent_provider", json: provider });
+    return provider;
+  },
+});

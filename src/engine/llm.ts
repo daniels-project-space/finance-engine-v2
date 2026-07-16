@@ -1,14 +1,9 @@
 // LLM ideation layer.
 //
-// AUTH POLICY (hard rule): Anthropic ideation runs through the locally
-// authenticated Claude Code CLI on Daniel's Max SUBSCRIPTION — `claude -p
-// --model <id> --output-format json`, reading the OAuth credentials at
-// ~/.claude/.credentials.json (auto-refreshed). There is NO @anthropic-ai/sdk
-// / ANTHROPIC_API_KEY path anywhere: the loop must never bill console credits.
-// This path runs BOTH on the VPS (local cron) AND in the Trigger.dev cloud
-// worker: @anthropic-ai/claude-code is baked into the deploy image and authed
-// from the injected CLAUDE_CODE_OAUTH_TOKEN. DeepSeek (OpenRouter) is the only
-// fallback, used solely when the CLI errors — a NON-Anthropic backup, allowed.
+// AUTH POLICY (hard rule): Daniel chooses Codex or Claude, and ideation runs
+// through that provider's owner-authenticated subscription CLI. Platform API
+// keys are explicitly scrubbed; a selected subscription never silently falls
+// back to billed API credits.
 //
 // Both producers yield StrategyDoc proposals validated by the DSL before they
 // touch the pipeline. Budget is the caller's job via the Convex counters; the
@@ -16,7 +11,7 @@
 // charge.
 
 import { execFile } from "node:child_process";
-import { mkdirSync, existsSync, readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { validateStrategy } from "./dsl";
@@ -33,7 +28,7 @@ export interface LlmProposal {
 }
 
 export interface LlmUsage {
-  provider: "anthropic-cli" | "openrouter";
+  provider: "anthropic-cli" | "codex-cli" | "openrouter";
   model: string;
   inputTokens: number;
   outputTokens: number;
@@ -44,6 +39,9 @@ export interface LlmUsage {
 // prompt at default effort can take minutes — generous so latency never aborts
 // a valid call. Override with EVOLUTION_LLM_TIMEOUT_MS.
 const CLI_TIMEOUT_MS = Number(process.env.EVOLUTION_LLM_TIMEOUT_MS ?? 12 * 60 * 1000);
+export type AgentProvider = "codex" | "claude";
+export const CODEX_EVOLUTION_MODEL = process.env.EVOLUTION_CODEX_MODEL ?? "gpt-5.6-sol";
+const CODEX_REASONING_EFFORT = process.env.EVOLUTION_CODEX_EFFORT ?? "high";
 
 export const DSL_GUIDE = `You design crypto perp trading strategies as JSON expression graphs ("DSL"). NO code — pure JSON.
 
@@ -343,6 +341,103 @@ export function runClaudeCli(prompt: string, model: string): Promise<{ text: str
   });
 }
 
+function resolveCodexBin(): string {
+  try {
+    const pkgJson = require.resolve("@openai/codex/package.json");
+    const pkgDir = dirname(pkgJson);
+    const nodeModules = dirname(dirname(pkgDir));
+    const candidates = [join(nodeModules, ".bin", "codex")];
+    const pkg = JSON.parse(readFileSync(pkgJson, "utf8")) as { bin?: string | Record<string, string> };
+    const rel = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.codex;
+    if (rel) candidates.push(join(pkgDir, rel));
+    for (const candidate of candidates) if (existsSync(candidate)) return candidate;
+  } catch { /* local global binary fallback */ }
+  return process.env.CODEX_BIN || "codex";
+}
+
+function codexSubscriptionEnv(runHome: string): NodeJS.ProcessEnv {
+  const encoded = process.env.CODEX_AUTH_JSON_B64;
+  const raw = process.env.CODEX_AUTH_JSON;
+  if (encoded || raw) {
+    mkdirSync(runHome, { recursive: true });
+    const json = encoded ? Buffer.from(encoded, "base64").toString("utf8") : raw!;
+    JSON.parse(json);
+    const authPath = join(runHome, "auth.json");
+    writeFileSync(authPath, json, { mode: 0o600 });
+    chmodSync(authPath, 0o600);
+  }
+  const localHome = process.env.CODEX_HOME ?? join(process.env.HOME ?? "/root", ".codex");
+  const codexHome = encoded || raw || process.env.CODEX_ACCESS_TOKEN ? runHome : localHome;
+  if (!process.env.CODEX_ACCESS_TOKEN && !existsSync(join(codexHome, "auth.json"))) {
+    throw new Error("Codex subscription auth is not configured");
+  }
+  return { ...process.env, CODEX_HOME: codexHome, OPENAI_API_KEY: "", CODEX_API_KEY: "" };
+}
+
+/** Run Codex headlessly with ChatGPT subscription auth; platform API keys are disabled. */
+export function runCodexCli(
+  prompt: string,
+  model = CODEX_EVOLUTION_MODEL,
+): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
+  return new Promise((resolve, reject) => {
+    const runKey = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const tmp = join("/tmp", `finance-codex-${runKey}`);
+    const runHome = join(tmp, "home");
+    const outputPath = join(tmp, "final.txt");
+    mkdirSync(tmp, { recursive: true });
+    let env: NodeJS.ProcessEnv;
+    try { env = codexSubscriptionEnv(runHome); }
+    catch (error) { rmSync(tmp, { recursive: true, force: true }); reject(error); return; }
+    const child = execFile(
+      resolveCodexBin(),
+      [
+        "exec", "--model", model,
+        "--config", `model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"`,
+        "--dangerously-bypass-approvals-and-sandbox", "--ignore-user-config",
+        "--ephemeral", "--skip-git-repo-check",
+        "--output-last-message", outputPath,
+        prompt,
+      ],
+      { timeout: CLI_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, cwd: "/tmp", env },
+      (err, stdout, stderr) => {
+        try {
+          if (err) return reject(new Error(`codex cli (${model}): ${err.message.slice(0, 160)} ${String(stderr).slice(-160)}`));
+          const saved = existsSync(outputPath) ? readFileSync(outputPath, "utf8").trim() : "";
+          const text = saved || String(stdout).trim();
+          if (!text) return reject(new Error(`codex cli (${model}): empty result`));
+          // The Codex CLI does not expose stable per-run token totals here. The
+          // subscription path is flat-rate, so these remain zero-valued metrics.
+          resolve({ text, inputTokens: 0, outputTokens: 0 });
+        } finally {
+          rmSync(tmp, { recursive: true, force: true });
+        }
+      },
+    );
+    // execFile gives the child a pipe for stdin. Codex appends piped stdin to an
+    // argument prompt and waits for EOF, so close it immediately.
+    child.stdin?.end();
+  });
+}
+
+export async function proposeWithCodexCli(
+  lessons: string[],
+  marketNotes: string,
+  championSummary: string,
+  nProposals = 4,
+  model = CODEX_EVOLUTION_MODEL,
+  anchored = false,
+  icRanking = "",
+): Promise<{ proposals: LlmProposal[]; usage: LlmUsage }> {
+  const prompt = anchored
+    ? `${buildPremiumPrompt(lessons, marketNotes, nProposals, championSummary, icRanking)}\n\nOutput ONLY a JSON object {"proposals":[{"premium":str,"mechanism":str,"hypothesis":str,"rationale":str,"strategy":{...}}]} that conforms to this schema: ${JSON.stringify(ANCHORED_SCHEMA)}. No prose, no markdown fences.`
+    : `${buildPrompt(lessons, marketNotes, nProposals, championSummary, icRanking)}\n\nOutput ONLY a JSON object {"proposals":[{"rationale":str,"strategy":{...}}]} that conforms to this schema: ${JSON.stringify(PROPOSAL_SCHEMA)}. No prose, no markdown fences.`;
+  const { text, inputTokens, outputTokens } = await runCodexCli(prompt, model);
+  return {
+    proposals: anchored ? parseAnchoredProposals(text) : parseProposals(text),
+    usage: { provider: "codex-cli", model, inputTokens, outputTokens, costUsd: 0 },
+  };
+}
+
 /** Anthropic ideation via the subscription Claude Code CLI (NO API key). */
 export async function proposeWithClaudeCli(
   lessons: string[],
@@ -419,38 +514,30 @@ export async function proposeWithDeepSeek(
   };
 }
 
-/**
- * Subscription Claude CLI first (when available — i.e. the CLI is on PATH);
- * on any error fall back to DeepSeek (OpenRouter). No Anthropic API path.
- * `allowClaudeCli` lets a caller force-skip the CLI (e.g. Trigger cloud, where
- * the binary/creds don't exist) so it goes straight to DeepSeek.
- */
+/** Run the explicitly selected subscription provider. No paid API fallback. */
 export async function propose(
-  keys: { openrouter?: string },
+  _keys: { openrouter?: string },
   budgetLeftUsd: number,
   lessons: string[],
   marketNotes: string,
   championSummary: string,
   nProposals = 4,
-  opts?: { allowClaudeCli?: boolean; model?: string; anchored?: boolean; icRanking?: string },
+  opts?: { allowClaudeCli?: boolean; model?: string; anchored?: boolean; icRanking?: string; provider?: AgentProvider },
 ): Promise<{ proposals: LlmProposal[]; usage: LlmUsage } | { proposals: []; usage: null; skipped: string }> {
   const allowCli = opts?.allowClaudeCli ?? (process.env.EVOLUTION_DISABLE_CLI !== "1");
   const anchored = opts?.anchored ?? false; // DEFAULT FALSE: legacy prompt unless caller opts in
   const icRanking = opts?.icRanking ?? "";  // CALIBRATION PASS: IC-steered prompt (cold-start safe)
-  if (allowCli && budgetLeftUsd > -1) {
-    try {
-      return await proposeWithClaudeCli(lessons, marketNotes, championSummary, nProposals, opts?.model ?? EVOLUTION_MODEL, anchored, icRanking);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`claude cli ideation failed (${msg.slice(0, 160)}), falling back to deepseek`);
-    }
+  const provider = opts?.provider ?? "codex";
+  if (!allowCli || budgetLeftUsd <= -1) {
+    return { proposals: [], usage: null, skipped: `${provider} subscription CLI disabled` };
   }
-  if (keys.openrouter) {
-    try {
-      return await proposeWithDeepSeek(keys.openrouter, lessons, marketNotes, championSummary, nProposals, anchored, icRanking);
-    } catch (err) {
-      console.warn(`deepseek failed: ${err instanceof Error ? err.message : err}`);
-    }
+  try {
+    return provider === "codex"
+      ? await proposeWithCodexCli(lessons, marketNotes, championSummary, nProposals, CODEX_EVOLUTION_MODEL, anchored, icRanking)
+      : await proposeWithClaudeCli(lessons, marketNotes, championSummary, nProposals, opts?.model ?? EVOLUTION_MODEL, anchored, icRanking);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`${provider} subscription ideation failed: ${message.slice(0, 200)}`);
+    return { proposals: [], usage: null, skipped: `${provider} subscription unavailable: ${message.slice(0, 120)}` };
   }
-  return { proposals: [], usage: null, skipped: "no working LLM provider (GP continues regardless)" };
 }

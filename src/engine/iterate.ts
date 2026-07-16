@@ -13,13 +13,13 @@
 //     the months/regime/symbol that broke it, an equity-curve summary).
 //   - buildFixPrompt: asks the LLM for a TARGETED fix to THAT failure, carrying the
 //     lineage scratchpad (what was tried, what each round did).
-//   - runFixRound: one LLM call (subscription CLI -> DeepSeek fallback) that returns
+//   - runFixRound: one call through the selected subscription CLI that returns
 //     the fixed StrategyDoc + rationale.
 // The CALLER (process.ts) drives the loop: it gauntlets each round with the REAL
 // gauntlet, feeds the report back here, caps rounds + token budget, keeps the best.
 // NO gauntlet/validation math here — generation/orchestration only.
 
-import { runClaudeCli, parseProposals, DSL_GUIDE, type LlmProposal, type LlmUsage } from "./llm";
+import { CODEX_EVOLUTION_MODEL, runClaudeCli, runCodexCli, parseProposals, DSL_GUIDE, type AgentProvider, type LlmProposal, type LlmUsage } from "./llm";
 import { EVOLUTION_MODEL, priceFor } from "./model";
 import type { StrategyDoc } from "./types";
 
@@ -152,13 +152,21 @@ Output ONLY a JSON object {"proposals":[{"rationale":str,"strategy":{...}}]} wit
 
 /** Run ONE fix round through the subscription CLI (→ DeepSeek fallback handled by
  *  the caller). Returns the single fixed proposal + usage, or null if no valid doc. */
-export async function runFixRound(prompt: string, model = EVOLUTION_MODEL): Promise<{ proposal: LlmProposal | null; usage: LlmUsage }> {
-  const { text, inputTokens, outputTokens } = await runClaudeCli(prompt, model);
+export async function runFixRound(prompt: string, provider: AgentProvider, model = EVOLUTION_MODEL): Promise<{ proposal: LlmProposal | null; usage: LlmUsage }> {
+  const selectedModel = provider === "codex" ? CODEX_EVOLUTION_MODEL : model;
+  const { text, inputTokens, outputTokens } = provider === "codex"
+    ? await runCodexCli(prompt, selectedModel)
+    : await runClaudeCli(prompt, selectedModel);
   const proposals = parseProposals(text);
-  const price = priceFor(model);
+  const price = priceFor(selectedModel);
   return {
     proposal: proposals[0] ?? null,
-    usage: { provider: "anthropic-cli", model, inputTokens, outputTokens, costUsd: (inputTokens * price.in + outputTokens * price.out) / 1_000_000 },
+    usage: {
+      provider: provider === "codex" ? "codex-cli" : "anthropic-cli",
+      model: selectedModel,
+      inputTokens,
+      outputTokens,
+      costUsd: provider === "codex" ? 0 : (inputTokens * price.in + outputTokens * price.out) / 1_000_000,
+    },
   };
 }
-

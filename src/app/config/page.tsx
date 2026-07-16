@@ -7,9 +7,11 @@ import { Panel, Stat, fmt } from "../components/ds";
 
 export default function ConfigPage() {
   const raw = useQuery(api.pipeline.getConfig, { key: "app" });
+  const agentProvider = useQuery(api.pipeline.getAgentProvider);
   const llmSpend = useQuery(api.pipeline.getCounter, { key: `llm_usd_cents:${new Date().toISOString().slice(0, 10)}` });
   const trials = useQuery(api.pipeline.getCounter, { key: "trials_total" });
   const setConfig = useMutation(api.pipeline.setConfig);
+  const setAgentProvider = useMutation(api.pipeline.setAgentProvider);
   const [text, setText] = useState("");
   const [saved, setSaved] = useState<"idle" | "ok" | "err">("idle");
 
@@ -35,6 +37,23 @@ export default function ConfigPage() {
         <Panel pad="p-4"><Stat label="LLM spend today" value={`$${((llmSpend ?? 0) / 100).toFixed(2)}`} tone="fg" /></Panel>
         <Panel pad="p-4"><Stat label="Config key" value="app" tone="dim" size="sm" sub="overrides defaults" /></Panel>
       </div>
+
+      <Panel title="Agent intelligence" right={<span className="num text-[10px] text-dim">subscription only · ideation layer</span>}>
+        <div className="flex items-center justify-between gap-4">
+          <p className="text-[13px] text-mid">Choose which subscription proposes and repairs strategy ideas. The gauntlet and paper-only execution are unchanged.</p>
+          <div className="flex shrink-0 rounded-md border border-[#ffffff12] bg-base p-1">
+            {(["codex", "claude"] as const).map((provider) => (
+              <button
+                key={provider}
+                onClick={() => setAgentProvider({ provider })}
+                className={`num rounded px-3 py-1.5 text-[11px] uppercase transition-colors ${agentProvider === provider ? "bg-accent/15 text-accent" : "text-dim hover:text-mid"}`}
+              >
+                {provider}
+              </button>
+            ))}
+          </div>
+        </div>
+      </Panel>
 
       <Panel title="App config" right={
         <button onClick={save}

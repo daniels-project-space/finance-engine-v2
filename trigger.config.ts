@@ -18,9 +18,9 @@ export default defineConfig({
     // subprocesses — keep it OUT of the esbuild bundle and let Trigger install
     // it fresh in the Linux image (correct platform binary). Auth is the
     // injected CLAUDE_CODE_OAUTH_TOKEN (subscription), never the billed API.
-    external: ["@anthropic-ai/claude-code"],
+    external: ["@anthropic-ai/claude-code", "@openai/codex"],
     extensions: [
-      additionalPackages({ packages: ["@anthropic-ai/claude-code@latest"] }),
+      additionalPackages({ packages: ["@anthropic-ai/claude-code@latest", "@openai/codex@latest"] }),
       aptGet({ packages: ["git", "ca-certificates"] }),
     ],
   },

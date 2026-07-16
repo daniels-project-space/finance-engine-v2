@@ -27,7 +27,7 @@ import { loadDvol, dvolMap, dvolCurrencyFor } from "../lib/deribit";
 import { realityCheck } from "../engine/rigor";
 import { buildBook, marginalContribution, bookQualifies, type Stream } from "../engine/book";
 import { perSleeveSignificant, marginalAdmits, bookLevelGate } from "../engine/bookGate";
-import { propose, proposeWithDeepSeek } from "../engine/llm";
+import { propose, type AgentProvider } from "../engine/llm";
 import { buildFailureReport, buildFixPrompt, runFixRound, ITERATE_DSL_GUIDE, type ReportLike, type LineageEntry } from "../engine/iterate";
 import { premiumOf } from "../engine/premia";
 import { setBayesTuning } from "../engine/tune";
@@ -92,7 +92,7 @@ export interface IterationResult { bestDoc: StrategyDoc; bestReport: GauntletRep
  */
 export async function iterateLineage(
   cx: ConvexHttpClient, seed: StrategyDoc, cfg: AppConfig, sealTs: number, log: Log,
-  opts: { maxRounds: number; tokenBudget: number; openrouterKey?: string },
+  opts: { maxRounds: number; tokenBudget: number; provider: AgentProvider },
 ): Promise<IterationResult | null> {
   const lineage: LineageEntry[] = [];
   let tokensIn = 0, tokensOut = 0;
@@ -116,17 +116,14 @@ export async function iterateLineage(
     // build THIS candidate's structured failure report + the targeted-fix prompt
     const failureReport = buildFailureReport(cur, report as ReportLike);
     const prompt = buildFixPrompt(ITERATE_DSL_GUIDE, failureReport, lineage, round + 1, opts.maxRounds);
-    // CLI first; DeepSeek fallback (one proposal — the fix)
+    // Use the same explicitly selected subscription for every repair round.
     let fix: { doc: StrategyDoc; rationale: string } | null = null;
     try {
-      const r = await runFixRound(prompt, cfg.iterate?.model ?? undefined);
+      const r = await runFixRound(prompt, opts.provider, cfg.iterate?.model ?? undefined);
       tokensIn += r.usage.inputTokens; tokensOut += r.usage.outputTokens;
       fix = r.proposal;
     } catch (e) {
-      log(`  iterate CLI fix failed (${e instanceof Error ? e.message.slice(0, 80) : e}); trying deepseek`);
-      if (opts.openrouterKey) {
-        try { const ds = await proposeWithDeepSeek(opts.openrouterKey, [failureReport], "", "", 1, false, ""); tokensIn += ds.usage.inputTokens; tokensOut += ds.usage.outputTokens; fix = ds.proposals[0] ?? null; } catch { /* */ }
-      }
+      log(`  iterate ${opts.provider} subscription fix failed (${e instanceof Error ? e.message.slice(0, 100) : e})`);
     }
     if (!fix) { log(`  iterate: no valid fix at round ${round}; stopping lineage`); break; }
     fix.doc.hypothesis = `${fix.doc.hypothesis} [iterated r${round + 1}: fix for ${report.failedStage}] ${fix.rationale.slice(0, 90)}`;
@@ -146,6 +143,8 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
 
   const todayCount = await cx.query(api.pipeline.getCounter, { key: todayKey("candidates") });
   if (todayCount >= cfg.evo.maxCandidatesPerDay) { summary.llmSkipped = "daily candidate cap"; return summary; }
+  const agentProvider = await cx.query(api.pipeline.getAgentProvider, {}) as AgentProvider;
+  log(`agent intelligence: ${agentProvider} subscription`);
 
   // CAPABILITY #4: arm the risk-managed ranking objective for the generation pass
   // too, so the iterate lineage's best-of-lineage pick (lineageScore -> composite)
@@ -468,7 +467,7 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
       { openrouter: process.env.OPENROUTER_API_KEY },
       budgetLeft, lessons, "", championSummary, cfg.evo.batchLlm,
       // WAVE-3b: premium-anchored prompt behind the DEFAULT-FALSE flag.
-      { allowClaudeCli: allowCli, anchored: cfg.generation.premiumAnchoredGen, icRanking },
+      { allowClaudeCli: allowCli, anchored: cfg.generation.premiumAnchoredGen, icRanking, provider: agentProvider },
     );
     if ("skipped" in result) summary.llmSkipped = result.skipped;
     else {
@@ -499,7 +498,7 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
           try {
             const seedDoc = result.proposals[li].doc;
             log(`iterate: lineage ${li + 1}/${nLineages} from "${seedDoc.name}" (≤${maxRounds} rounds)`);
-            const it = await iterateLineage(cx, seedDoc, cfg, sealTsIter, log, { maxRounds, tokenBudget, openrouterKey: process.env.OPENROUTER_API_KEY });
+            const it = await iterateLineage(cx, seedDoc, cfg, sealTsIter, log, { maxRounds, tokenBudget, provider: agentProvider });
             if (it && it.rounds > 1) {
               it.bestDoc.hypothesis = `${it.bestDoc.hypothesis} [iterated ${it.rounds}r, ${it.improved ? "improved" : "explored"}]`;
               proposals.push({ doc: it.bestDoc, source: "llm", mechanism: "iterated", expectedComposite: globalMean, wild: false });
