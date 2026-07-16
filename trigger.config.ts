@@ -1,5 +1,5 @@
 import { defineConfig } from "@trigger.dev/sdk";
-import { additionalPackages, aptGet } from "@trigger.dev/build/extensions/core";
+import { additionalPackages, aptGet, syncEnvVars } from "@trigger.dev/build/extensions/core";
 
 export default defineConfig({
   project: "proj_wmvfhfcpwnsnfzhrfooh",
@@ -22,6 +22,9 @@ export default defineConfig({
     extensions: [
       additionalPackages({ packages: ["@anthropic-ai/claude-code@latest", "@openai/codex@latest"] }),
       aptGet({ packages: ["git", "ca-certificates"] }),
+      syncEnvVars(() => process.env.CODEX_AUTH_JSON_B64
+        ? { CODEX_AUTH_JSON_B64: process.env.CODEX_AUTH_JSON_B64 }
+        : undefined),
     ],
   },
 });
