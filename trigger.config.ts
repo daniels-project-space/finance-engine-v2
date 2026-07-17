@@ -22,9 +22,14 @@ export default defineConfig({
     extensions: [
       additionalPackages({ packages: ["@anthropic-ai/claude-code@latest", "@openai/codex@latest"] }),
       aptGet({ packages: ["git", "ca-certificates"] }),
-      syncEnvVars(() => process.env.CODEX_AUTH_JSON_B64
-        ? { CODEX_AUTH_JSON_B64: process.env.CODEX_AUTH_JSON_B64 }
-        : undefined),
+      syncEnvVars(() => {
+        const values = Object.fromEntries(
+          ["CODEX_AUTH_JSON_B64", "VAULT_ACCESS_TOKEN"]
+            .map((key) => [key, process.env[key]])
+            .filter((entry): entry is [string, string] => Boolean(entry[1])),
+        );
+        return Object.keys(values).length ? values : undefined;
+      }),
     ],
   },
 });
