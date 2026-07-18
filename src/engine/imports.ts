@@ -1,8 +1,7 @@
-// Strategies imported from published, citable sources — rules translated
-// faithfully into the DSL, source URL in every hypothesis. They get no
-// special treatment: same gauntlet, same floors. If they out-rank the
-// home-grown pool, the breeder and the Opus lane inherit them automatically
-// (parents come from the tournament board; lessons cite their mechanisms).
+// Research imports and legacy VPS candidates expressed as typed DSL graphs.
+// Every entry gets the same gauntlet and paper-only path. Legacy imports carry
+// their negative/insufficient historical evidence explicitly; they are retests,
+// not performance claims or promotions.
 
 import type { Expr, ParamSpec, StrategyDoc } from "./types";
 
@@ -27,6 +26,7 @@ const pctrank = (src: Expr, period: Expr): Expr => ({ op: "pctrank", src, period
 const add = (a: Expr, b: Expr): Expr => ({ op: "add", a, b });
 const sub = (a: Expr, b: Expr): Expr => ({ op: "sub", a, b });
 const mul = (a: Expr, b: Expr): Expr => ({ op: "mul", a, b });
+const div = (a: Expr, b: Expr): Expr => ({ op: "div", a, b });
 const gt = (a: Expr, b: Expr): Expr => ({ op: "gt", a, b });
 const lt = (a: Expr, b: Expr): Expr => ({ op: "lt", a, b });
 const crossunder = (a: Expr, b: Expr): Expr => ({ op: "crossunder", a, b });
@@ -120,5 +120,57 @@ export const IMPORTED_LIBRARY: StrategyDoc[] = [
     longExit: lt(c, sma(c, P("bbN"))),
     params: { bbN: p(14, 40, 20) },
     risk: { volTargetAnnual: 0.25, maxLeverage: 2, trailAtrMult: 3.5 },
+  },
+];
+
+/**
+ * The two interpretable VPS mechanisms worth retesting in the v2 engine.
+ *
+ * Selection evidence from `/home/ubuntu/finance-engine/db/finance.db` on
+ * 2026-07-18: every legacy candidate failed or was insufficient under its own
+ * sealed-holdout / walk-forward checks. These two are retained because their
+ * complete rules are auditable, not because they earned a promotion. The
+ * pipeline labels them `legacy-vps` and sends them through the exact same v2
+ * gauntlet, cross-symbol checks, sealed test, and 30-day paper incubation.
+ */
+export const LEGACY_VPS_LIBRARY: StrategyDoc[] = [
+  {
+    name: "legacy_vps_turtle_20_10",
+    hypothesis: "Legacy VPS retest of Turtle System 1 / Donchian 20/10 (Curtis Faith, Way of the Turtle): buy a close above the prior 20-bar high and sell/short a close below the prior 20-bar low; exit each side at the opposing prior 10-bar channel. Legacy SOL/USDT 1d evidence was insufficient (sealed Sharpe 0.73 on 5 trades; 5/18 positive walk-forward months; not deployable), so this is an untrusted mechanism retest only.",
+    tf: "1d",
+    longEntry: gt(c, lag(highest(h, P("entryN")), 1)),
+    longExit: lt(c, lag(lowest(l, P("exitN")), 1)),
+    shortEntry: lt(c, lag(lowest(l, P("entryN")), 1)),
+    shortExit: gt(c, lag(highest(h, P("exitN")), 1)),
+    params: { entryN: p(16, 24, 20), exitN: p(8, 12, 10) },
+    // The original VPS code delegated sizing to its portfolio layer. This is
+    // the explicit v2 paper-risk envelope, not a legacy return assumption.
+    risk: { volTargetAnnual: 0.2, maxLeverage: 1, stopAtrMult: 3 },
+  },
+  {
+    name: "legacy_vps_carver_ewmac_16_64",
+    hypothesis: "Legacy VPS retest of the Carver EWMAC 16/64 mechanism (Systematic Trading / pysystemtrade): enter when the EMA spread divided by rolling price volatility crosses ±5 and flatten when it returns through zero. The VPS ETH/USDT 4h test was insufficient (sealed Sharpe 0.12 on 3 trades; 2/18 positive walk-forward months; not deployable), so this is an untrusted mechanism retest only.",
+    tf: "4h",
+    longEntry: gt(
+      div(sub(ema(c, P("fast")), ema(c, P("slow"))), mul(stdev(roc(c, k(1)), P("volN")), c)),
+      P("entryTh"),
+    ),
+    longExit: lt(
+      div(sub(ema(c, P("fast")), ema(c, P("slow"))), mul(stdev(roc(c, k(1)), P("volN")), c)),
+      P("exitTh"),
+    ),
+    shortEntry: lt(
+      div(sub(ema(c, P("fast")), ema(c, P("slow"))), mul(stdev(roc(c, k(1)), P("volN")), c)),
+      { op: "neg", a: P("entryTh") },
+    ),
+    shortExit: gt(
+      div(sub(ema(c, P("fast")), ema(c, P("slow"))), mul(stdev(roc(c, k(1)), P("volN")), c)),
+      { op: "neg", a: P("exitTh") },
+    ),
+    params: {
+      fast: p(12, 20, 16), slow: p(48, 80, 64), volN: p(20, 30, 25),
+      entryTh: { min: 3, max: 7, default: 5 }, exitTh: { min: -0.2, max: 0.2, default: 0 },
+    },
+    risk: { volTargetAnnual: 0.2, maxLeverage: 1, stopAtrMult: 3 },
   },
 ];

@@ -11,7 +11,7 @@ import { canonicalHash, familyHash, validateStrategy } from "../engine/dsl";
 import { crossoverStrategies, mutateStrategy, randomStrategy, mechanismFirstStrategy, mechanismKeys, recipeOf, setIcBias, MUTATION_OPS, type MutationHint, type MutationOp } from "../engine/evolve";
 import { icFamilyWeights, icRankingText, type IcRankedRow } from "../engine/signals";
 import { SEED_LIBRARY } from "../engine/library";
-import { IMPORTED_LIBRARY } from "../engine/imports";
+import { IMPORTED_LIBRARY, LEGACY_VPS_LIBRARY } from "../engine/imports";
 import { evaluateSealed, runGauntlet, runGauntletXSection, runGauntletIv, runGauntletOc, runGauntletTrend, runGauntletCombination, setRiskObjective, setMonteCarlo, type GauntletReport } from "../engine/gauntlet";
 import { isCombination, type CombinationDoc } from "../engine/combination";
 import { generateCombination, mutateCombination, validateCombination, combinationHash, combinationFamilyHash } from "../engine/combinationGen";
@@ -285,6 +285,15 @@ export async function generateBatch(cx: ConvexHttpClient, cfg: AppConfig, log: L
     const hash = canonicalHash(impDoc);
     if (!(await cx.query(api.candidates.hashExists, { hash }))) {
       proposals.push({ doc: impDoc, source: "imported", mechanism: "imported" });
+    }
+  }
+  // Legacy VPS source is intentionally separate from research imports. It is a
+  // provenance label for mechanisms that did not pass their old validation,
+  // not a path around the v2 acceptance, sealed, or paper-only gates.
+  for (const legacyDoc of LEGACY_VPS_LIBRARY) {
+    const hash = canonicalHash(legacyDoc);
+    if (!(await cx.query(api.candidates.hashExists, { hash }))) {
+      proposals.push({ doc: legacyDoc, source: "legacy-vps", mechanism: "legacy-vps" });
     }
   }
 

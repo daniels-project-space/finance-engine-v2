@@ -142,7 +142,7 @@ async function main() {
   const inp2 = toArrays(bars);
   check("hourutc cycles 0-23", inp2.hour[0] === (bars.t[0] / 3600000) % 24 && Math.max(...Array.from(inp2.hour.slice(0, 48))) === 23);
   check("dowutc in 0-6", Array.from(inp2.dow.slice(0, 200)).every((d) => d >= 0 && d <= 6));
-  const { IMPORTED_LIBRARY } = await import("../src/engine/imports");
+  const { IMPORTED_LIBRARY, LEGACY_VPS_LIBRARY } = await import("../src/engine/imports");
   let impValid = 0;
   for (const s of IMPORTED_LIBRARY) {
     const errs = validateStrategy(s);
@@ -150,6 +150,13 @@ async function main() {
     else console.error(`    ${s.name}: ${errs.join("; ")}`);
   }
   check(`all ${IMPORTED_LIBRARY.length} imported strategies valid`, impValid === IMPORTED_LIBRARY.length);
+  let legacyValid = 0;
+  for (const s of LEGACY_VPS_LIBRARY) {
+    const errs = validateStrategy(s);
+    if (errs.length === 0) legacyValid++;
+    else console.error(`    ${s.name}: ${errs.join("; ")}`);
+  }
+  check(`all ${LEGACY_VPS_LIBRARY.length} legacy VPS retests valid`, legacyValid === LEGACY_VPS_LIBRARY.length);
 
   console.log("— funding op + portfolio merge —");
   const { mergePortfolio, seriesStats } = await import("../src/engine/gauntlet");
