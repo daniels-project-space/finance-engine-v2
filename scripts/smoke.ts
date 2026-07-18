@@ -17,6 +17,7 @@ import { buildOcDaily, backtestOc, isOcSleeve } from "../src/engine/onchainsleev
 import { buildIvDaily, backtestIv, isIvSleeve } from "../src/engine/ivsleeve";
 import { buildBlendDaily, backtestBlend, isBlendSleeve, type BlendSleeveDoc } from "../src/engine/blendsleeve";
 import { validateBlend } from "../src/engine/blendsleeveGen";
+import { isLiveTradingExplicitlyApproved } from "../src/live/approval";
 
 let failures = 0;
 function check(name: string, cond: boolean, info = "") {
@@ -56,6 +57,10 @@ const emaCross: StrategyDoc = {
 };
 
 async function main() {
+  console.log("— financial execution guard —");
+  check("live trading fails closed without explicit approval", !isLiveTradingExplicitlyApproved());
+  check("live trading accepts only exact explicit approval", isLiveTradingExplicitlyApproved("true") && !isLiveTradingExplicitlyApproved("TRUE"));
+
   console.log("— DSL validation & hashing —");
   check("valid strategy passes", validateStrategy(emaCross).length === 0, JSON.stringify(validateStrategy(emaCross)));
   const h1 = canonicalHash(emaCross);

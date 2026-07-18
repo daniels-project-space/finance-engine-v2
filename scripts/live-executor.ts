@@ -22,6 +22,7 @@ import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api";
 import type { Id } from "../convex/_generated/dataModel";
 import { ensureEnv } from "../src/live/env";
+import { isLiveTradingExplicitlyApproved, LIVE_TRADING_APPROVAL_REASON } from "../src/live/approval";
 import { computeLiveTarget } from "../src/live/targets";
 import {
   baseAsset, getBalances, getFilters, getPrice, getRestrictions, marketOrder, roundToStep,
@@ -196,6 +197,12 @@ async function executeOrder(cx: ConvexHttpClient, dep: Dep, a: {
   }
 
   if (dep.mode === "live") {
+    // A `live` database row alone must never authorize a real order. This
+    // second, process-scoped gate is deliberately separate from Convex and
+    // defaults closed when the VPS is restarted or its environment changes.
+    if (!isLiveTradingExplicitlyApproved()) {
+      return noop(`live order blocked: ${LIVE_TRADING_APPROVAL_REASON}`, "rejected", LIVE_TRADING_APPROVAL_REASON);
+    }
     if (!a.canTradeLive) {
       await sendTelegram(`🔒 *live-executor* "${dep.name}" wants to ${a.side} $${notional.toFixed(2)} but the Binance key is READ-ONLY. Enable Spot & Margin Trading (or swap the key) to let it trade.`);
       return noop(`live order blocked: key read-only`, "rejected", "binance key lacks Spot trading permission");
