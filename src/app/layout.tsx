@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { JetBrains_Mono, Space_Grotesk } from "next/font/google";
 import Link from "next/link";
+import Script from "next/script";
 import "./globals.css";
 import { NavLinks } from "./components/nav";
 import { Logo } from "./components/logo";
@@ -39,6 +40,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </header>
           <main className="mx-auto max-w-[1280px] px-5 py-6">{children}</main>
         </Providers>
+        <Script
+          src="https://jarvis-orcin-six.vercel.app/jarvis-embed.js?v=universal-controls-20260719-1"
+          strategy="afterInteractive"
+          data-jarvis-app="finance-engine-v2"
+        />
       </body>
     </html>
   );
